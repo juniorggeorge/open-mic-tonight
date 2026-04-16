@@ -22,10 +22,16 @@ async function ldIdx() {
 }
 async function svIdx() { /* no-op — list comes from venues collection */ }
 
+// ─── My Venues (local device tracking) ────────────────────────────
+const MY_KEY = "omic-my-v1";
+function myVenues() { try { return JSON.parse(localStorage.getItem(MY_KEY) || "[]") } catch { return [] } }
+function addMyVenue(slug) { try { const v = myVenues(); if (!v.includes(slug)) { v.push(slug); localStorage.setItem(MY_KEY, JSON.stringify(v)) } } catch {} }
+function removeMyVenue(slug) { try { localStorage.setItem(MY_KEY, JSON.stringify(myVenues().filter(s => s !== slug))) } catch {} }
+
 // ─── Utils ────────────────────────────────────────────────────────
 const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MO=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",archived:false};
+const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",archived:false};
 
 function gid(){return Math.random().toString(36).slice(2,10)+Date.now().toString(36)}
 function slug(s){return s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,48)}
@@ -43,9 +49,9 @@ function findDev(sl,d){for(const[k,v]of Object.entries(sl))if(v&&v.deviceId===d)
 function nextF(sl,tot,cur){for(let i=cur+1;i<=tot;i++)if(sl[String(i)])return i;return null}
 function lowOpen(sl,tot){for(let i=1;i<=tot;i++)if(!sl[String(i)])return i;return null}
 function eUrl(s){if(!s)return"";const t=s.trim();return/^https?:\/\//i.test(t)?t:"https://"+t}
+function addr(s){return(s.venueAddress||s.venueName||"").trim()}
+function shortAddr(a,n){if(!a)return"";return a.length>n?a.slice(0,n-1)+"…":a}
 function mvSlot(si,tot,f,t){if(f===t)return si;const s={...si},p=s[String(f)];if(!p)return si;delete s[String(f)];if(!s[String(t)]){s[String(t)]=p;return s}let ed=null,eu=null;for(let i=t+1;i<=tot;i++){if(!s[String(i)]){ed=i;break}}for(let i=t-1;i>=1;i--){if(!s[String(i)]){eu=i;break}}const dd=t>f,ud=dd?(ed!==null):(eu===null);if(ud&&ed!==null){for(let i=ed;i>t;i--)s[String(i)]=s[String(i-1)]||null}else if(!ud&&eu!==null){for(let i=eu;i<t;i++)s[String(i)]=s[String(i+1)]||null}else if(ed!==null){for(let i=ed;i>t;i--)s[String(i)]=s[String(i-1)]||null}else if(eu!==null){for(let i=eu;i<t;i++)s[String(i)]=s[String(i+1)]||null}s[String(t)]=p;for(let i=1;i<=tot;i++)if(!s[String(i)])delete s[String(i)];return s}
-async function reqN(){if(!("Notification"in window))return false;if(Notification.permission==="granted")return true;return(await Notification.requestPermission())==="granted"}
-function sndN(t,b){if("Notification"in window&&Notification.permission==="granted")try{new Notification(t,{body:b,tag:"omic"})}catch{}}
 
 // ─── CSS ──────────────────────────────────────────────────────────
 const CSS = `
@@ -145,7 +151,7 @@ function SlotGrid({slots,totalSlots,currentSlot,onDeckSlot,onMove,onRemove,onCle
       if(p)return(<div key={n} onClick={()=>tap(n)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 10px",marginBottom:2,cursor:"pointer",userSelect:"none",borderRadius:2,transition:"all .1s",background:isSel?"#fff3c4":cur?"#fff8e8":od?"#e8f6f0":done?"var(--paper-dark)":"var(--cream)",opacity:done&&!isSel?0.35:1,borderLeft:`4px solid ${isSel?"var(--coral)":od?"var(--teal)":cur?"var(--coral)":"transparent"}`,outline:isSel?"2px solid var(--coral)":"none"}}>
         <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
           <span style={{fontFamily:"'Overpass Mono',monospace",fontSize:14,fontWeight:700,width:24,textAlign:"center",color:cur?"var(--coral)":"var(--ink-mid)",flexShrink:0}}>{n}</span>
-          <span style={{fontSize:14,fontWeight:600,color:isSel?"var(--coral)":"var(--ink)"}}>{p.name}</span>
+          <span style={{fontSize:14,fontWeight:600,color:isSel?"var(--coral)":p.pending?"var(--ink-light)":"var(--ink)",fontStyle:p.pending?"italic":"normal"}}>{p.pending?"(reserving…)":p.name}</span>
           {p.link&&!sel&&<button onClick={e=>{e.stopPropagation();onClearLink(n)}} style={{background:"none",border:"none",color:"var(--teal)",fontSize:10,cursor:"pointer"}}>🔗✕</button>}
           {od&&!isSel&&<Tape color="#d4f0e8">ON DECK</Tape>}
           {isSel&&<Tape color="#fff3c4">SELECTED</Tape>}
@@ -165,14 +171,18 @@ function SlotGrid({slots,totalSlots,currentSlot,onDeckSlot,onMove,onRemove,onCle
 function useGeo(st){const[status,setS]=useState("idle");const[dist,setD]=useState(null);const check=useCallback(()=>{if(!st.geofenceEnabled||!st.venueLat){setS("ok");return}if(!navigator.geolocation){setS("unavailable");return}setS("checking");navigator.geolocation.getCurrentPosition(p=>{const d=hav(p.coords.latitude,p.coords.longitude,st.venueLat,st.venueLng);setD(Math.round(d));setS(d<=st.venueRadius?"ok":"too_far")},()=>setS("error"),{enableHighAccuracy:true,timeout:10000})},[st.geofenceEnabled,st.venueLat,st.venueLng,st.venueRadius]);return{status,dist,check}}
 function sameDay(a,b){const d1=new Date(a),d2=new Date(b);return d1.getFullYear()===d2.getFullYear()&&d1.getMonth()===d2.getMonth()&&d1.getDate()===d2.getDate()}
 function useSch(st,persist){const ref=useRef(st);ref.current=st;useEffect(()=>{if(!st.scheduleEnabled)return;const tick=()=>{const s=ref.current;if(s.archived)return;const so=inSch(s);const isNewWindow=so===true&&(!s.showDate||!sameDay(s.showDate,Date.now()));if(s.manualOverride){if(isNewWindow)persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false});return}if(isNewWindow)persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[]})};tick();const id=setInterval(tick,15000);return()=>clearInterval(id)},[st.scheduleEnabled,JSON.stringify(st.scheduleDays),st.scheduleOpenHour,st.scheduleOpenMin,st.scheduleShowHour,st.scheduleShowMin,st.scheduleDuration])}
-function useOD(st){const prev=useRef(st.currentSlot);useEffect(()=>{if(st.currentSlot!==prev.current){prev.current=st.currentSlot;const nxt=nextF(st.slots,st.totalSlots,st.currentSlot);if(nxt){const p=st.slots[String(nxt)];sndN("🎤 You're on deck!",`${p.name}, you're up next!`)}}},[st.currentSlot,st.slots,st.totalSlots])}
 
 // ═══════════════════════════════════════════════════════════════════
 //  DIRECTORY
 // ═══════════════════════════════════════════════════════════════════
 function DirPage({go}){
   const[venues,setV]=useState([]);const[ld,setLd]=useState(true);
-  useEffect(()=>{(async()=>{const idx=await ldIdx();const all=[];for(const e of idx){const v=await ldV(e.slug);if(v)all.push({slug:e.slug,...v})}setV(all);setLd(false)})()},[]);
+  const[q,setQ]=useState("");const[mine,setMine]=useState([]);
+  useEffect(()=>{(async()=>{const idx=await ldIdx();const all=[];for(const e of idx){const v=await ldV(e.slug);if(v)all.push({slug:e.slug,...v})}setV(all);setLd(false);setMine(myVenues())})()},[]);
+  const ql=q.trim().toLowerCase();
+  const searching=ql.length>0;
+  const matches=searching?venues.filter(v=>v.eventName?.toLowerCase().includes(ql)||v.slug.toLowerCase().includes(ql)):[];
+  const myList=mine.map(s=>venues.find(v=>v.slug===s)).filter(Boolean);
   const live=venues.filter(v=>v.signupOpen&&!v.archived),rest=venues.filter(v=>!v.signupOpen&&!v.archived);
   return(<div style={PAGE}><style>{CSS}</style>
     <div style={{...CARD,marginTop:40,textAlign:"center"}} className="drift">
@@ -183,16 +193,46 @@ function DirPage({go}){
         onMouseDown={e=>{e.currentTarget.style.transform="translate(2px,2px)";e.currentTarget.style.boxShadow="1px 1px 0 var(--shadow)"}}
         onMouseUp={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="3px 3px 0 var(--shadow)"}}>+ NEW OPEN MIC</button>
     </div>
-    {live.length>0&&<div style={{maxWidth:460,width:"100%",marginTop:28}} className="drift-1">
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><div style={{width:8,height:8,borderRadius:"50%",background:"var(--teal)",animation:"blink 1.5s infinite"}}/><span style={{...SUB,color:"var(--teal)",margin:0}}>HAPPENING NOW</span></div>
-      {live.map(v=><div key={v.slug} onClick={()=>go(v.slug)} style={{...CARD_ALT,cursor:"pointer",marginBottom:10,padding:"16px 18px",borderColor:"var(--teal)"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div><p style={{...TITLE,fontSize:18,margin:0}}>{v.eventName}</p><p style={{...BODY,fontSize:12,marginTop:3}}>{filled(v.slots||{}).length}/{v.totalSlots} slots{v.venueName?` · ${v.venueName.split(",")[0]}`:""}</p></div><span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span></div>
+
+    <div style={{maxWidth:460,width:"100%",marginTop:20}}>
+      <input style={{...INP,fontSize:14}} placeholder="🔍 search venues (includes ended shows)" value={q} onChange={e=>setQ(e.target.value)}/>
+    </div>
+
+    {myList.length>0&&!searching&&<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-1">
+      <span style={SUB}>YOUR VENUES</span>
+      {myList.map(v=><div key={v.slug} onClick={()=>go(`${v.slug}/host`)} style={{...SECT,cursor:"pointer",marginTop:8,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+        <div style={{minWidth:0,flex:1}}>
+          <p style={{fontWeight:700,fontSize:15,margin:0}}>{v.eventName}</p>
+          <p style={{...BODY,fontSize:12,marginTop:2}}>{v.slug}{v.archived?" · ended":v.signupOpen?" · live":""}</p>
+        </div>
+        {v.archived&&<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>}
+        {v.signupOpen&&!v.archived&&<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>}
       </div>)}
     </div>}
-    {rest.length>0&&<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-2">
-      <span style={SUB}>ALL VENUES</span>
-      {rest.map(v=><div key={v.slug} onClick={()=>go(v.slug)} style={{...SECT,cursor:"pointer",marginTop:8}}><p style={{fontWeight:700,fontSize:15,margin:0}}>{v.eventName}</p><p style={{...BODY,fontSize:12,marginTop:2}}>{v.slug}{v.showDate?` · last ${fD(v.showDate)}`:""}</p></div>)}
-    </div>}
+
+    {searching?<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-2">
+      <span style={SUB}>{matches.length} result{matches.length!==1?"s":""}</span>
+      {matches.length===0&&<p style={{...BODY,marginTop:12,textAlign:"center"}}>No venues match "{q}". Try fewer words.</p>}
+      {matches.map(v=><div key={v.slug} onClick={()=>go(v.archived?`${v.slug}/host`:v.slug)} style={{...SECT,cursor:"pointer",marginTop:8,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,opacity:v.archived?0.75:1}}>
+        <div style={{minWidth:0,flex:1}}>
+          <p style={{fontWeight:700,fontSize:15,margin:0}}>{v.eventName}</p>
+          <p style={{...BODY,fontSize:12,marginTop:2}}>{v.slug}{v.showDate?` · last ${fD(v.showDate)}`:""}</p>
+        </div>
+        {v.archived?<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>:v.signupOpen?<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>:null}
+      </div>)}
+      {matches.some(v=>v.archived)&&<p style={{...BODY,fontSize:11,marginTop:10,color:"var(--ink-light)",textAlign:"center"}}>Ended venues link straight to the host panel (PIN required).</p>}
+    </div>:<>
+      {live.length>0&&<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-1">
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><div style={{width:8,height:8,borderRadius:"50%",background:"var(--teal)",animation:"blink 1.5s infinite"}}/><span style={{...SUB,color:"var(--teal)",margin:0}}>HAPPENING NOW</span></div>
+        {live.map(v=><div key={v.slug} onClick={()=>go(v.slug)} style={{...CARD_ALT,cursor:"pointer",marginBottom:10,padding:"16px 18px",borderColor:"var(--teal)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div><p style={{...TITLE,fontSize:18,margin:0}}>{v.eventName}</p><p style={{...BODY,fontSize:12,marginTop:3}}>{filled(v.slots||{}).length}/{v.totalSlots} slots{addr(v)?` · ${shortAddr(addr(v),50)}`:""}</p></div><span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span></div>
+        </div>)}
+      </div>}
+      {rest.length>0&&<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-2">
+        <span style={SUB}>ALL VENUES</span>
+        {rest.map(v=><div key={v.slug} onClick={()=>go(v.slug)} style={{...SECT,cursor:"pointer",marginTop:8}}><p style={{fontWeight:700,fontSize:15,margin:0}}>{v.eventName}</p><p style={{...BODY,fontSize:12,marginTop:2}}>{v.slug}{v.showDate?` · last ${fD(v.showDate)}`:""}</p></div>)}
+      </div>}
+    </>}
     {ld&&<p style={{...BODY,marginTop:30}}>loading…</p>}
     {!ld&&venues.length===0&&<p style={{...BODY,marginTop:30}}>No open mics yet. Start one!</p>}
   </div>);
@@ -208,7 +248,7 @@ function CreatePage({go}){
   const[limMode,setLimMode]=useState("time");const[spp,setSpp]=useState(2);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   useEffect(()=>{if(!cust)setSl(slug(name))},[name,cust]);
-  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts};await svV(sl,v);const idx=await ldIdx();go(`${sl}/host`)};
+  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts};await svV(sl,v);const idx=await ldIdx();addMyVenue(sl);go(`${sl}/host`)};
   return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{maxWidth:460,width:"100%",marginTop:30}}>
       <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
@@ -248,13 +288,12 @@ function CreatePage({go}){
 function VenuePage({slug:SL,go}){
   const[vw,setVw]=useState("landing");const[st,setSt]=useState(DS);const[ld,setLd]=useState(false);
   const[sN,setSN]=useState("");const[sL,setSL2]=useState("");const[step,setStep]=useState("form");
-  const[eN,setEN]=useState("");const[eL,setEL]=useState("");const[msg,setMsg]=useState("");const[nP,setNP]=useState("unknown");
+  const[eN,setEN]=useState("");const[eL,setEL]=useState("");const[msg,setMsg]=useState("");
   const did=useRef(devId());const geo=useGeo(st);
   const refresh=useCallback(async()=>{const v=await ldV(SL);if(v)setSt(p=>({...p,...v}));setLd(true)},[SL]);
   useEffect(()=>{refresh();const id=setInterval(refresh,3000);return()=>clearInterval(id)},[refresh]);
-  useEffect(()=>{if(!("Notification"in window))setNP("unsupported");else setNP(Notification.permission)},[]);
   const persist=useCallback(n=>{setSt(n);svV(SL,n)},[SL]);
-  useSch(st,persist);useOD(st);
+  useSch(st,persist);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   const cnt=filled(st.slots).length;const os=[];for(let i=1;i<=st.totalSlots;i++)if(!st.slots[String(i)])os.push(i);
   const ps=os.filter(n=>st.currentSlot===0||n>st.currentSlot);
@@ -262,12 +301,22 @@ function VenuePage({slug:SL,go}){
   const odS=nextF(st.slots,st.totalSlots,st.currentSlot),odP=odS?st.slots[String(odS)]:null;
   const schD=st.scheduleDays||[4];
   const me=findDev(st.slots,did.current),mw=st.waitlist.find(w=>w.deviceId===did.current),al=me||mw;
-  const signupNext=()=>{if(!sN.trim()){flash("Enter your name");return}if(al){flash("Already signed up!");return}if((st.performedDevices||[]).includes(did.current)){flash("Already performed tonight!");return}if(ps.length===0){persist({...st,waitlist:[...st.waitlist,{id:gid(),name:sN.trim(),deviceId:did.current,time:Date.now()}]});flash("Waitlisted!");setSN("");return}setStep("pick")};
-  const pickSlot=n=>{const e={id:gid(),name:sN.trim(),deviceId:did.current,time:Date.now()};persist({...st,slots:{...st.slots,[String(n)]:e},showDate:st.showDate||Date.now()});flash("You're in! 🎤");setSN("");if(st.allowLinks){setSL2("");setStep("linkPrompt")}else setStep("form")};
+  useEffect(()=>{if(vw==="signup"&&me&&me.pending&&step==="form")setStep("name")},[vw,me,step]);
+  const pickSlot=n=>{const e={id:gid(),name:"",deviceId:did.current,time:Date.now(),pending:true};persist({...st,slots:{...st.slots,[String(n)]:e},showDate:st.showDate||Date.now()});setStep("name")};
+  const joinWaitlist=()=>{setStep("waitlistName")};
+  const submitName=()=>{
+    if(!sN.trim()){flash("Enter your name");return}
+    if(me){persist({...st,slots:{...st.slots,[String(me.slotNum)]:{...st.slots[String(me.slotNum)],name:sN.trim(),pending:false}}});flash("You're in! 🎤");setSN("");if(st.allowLinks){setSL2("");setStep("linkPrompt")}else setStep("form")}
+  };
+  const submitWaitlistName=()=>{
+    if(!sN.trim()){flash("Enter your name");return}
+    persist({...st,waitlist:[...st.waitlist,{id:gid(),name:sN.trim(),deviceId:did.current,time:Date.now()}]});
+    flash("Waitlisted!");setSN("");setStep("form");
+  };
+  const releaseSlot=()=>{if(me){const s={...st.slots};delete s[String(me.slotNum)];persist({...st,slots:s})}setStep("form")};
   const saveEdit=()=>{if(!eN.trim()){flash("Name can't be empty");return}if(me){persist({...st,slots:{...st.slots,[String(me.slotNum)]:{...st.slots[String(me.slotNum)],name:eN.trim(),link:eL.trim()||null}}})}else if(mw){persist({...st,waitlist:st.waitlist.map(w=>w.deviceId===did.current?{...w,name:eN.trim(),link:eL.trim()||null}:w)})}flash("Updated!");setStep("form")};
   const repick=n=>{if(!me)return;const s={...st.slots};const p={...s[String(me.slotNum)]};delete s[String(me.slotNum)];s[String(n)]=p;persist({...st,slots:s});flash(`Moved to #${n}`);setStep("form")};
   const startEdit=()=>{setEN(al?.name||"");setEL(al?.link||"");setStep("edit")};
-  const enNotif=async()=>{const ok=await reqN();setNP(ok?"granted":"denied");flash(ok?"Notifications on!":"Blocked")};
   if(!ld)return<div style={PAGE}><style>{CSS}</style><p style={BODY}>loading…</p></div>;
 
   if(vw==="landing"){
@@ -287,13 +336,15 @@ function VenuePage({slug:SL,go}){
           <p style={{...BODY,fontSize:12,marginTop:6}}>Signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · Show {fT(shH,shM)} · {st.limitMode==="time"?`${st.timePerSlot} min`:`${st.songsPerSlot} song${st.songsPerSlot!==1?"s":""}`}/act</p>
           <p style={{...BODY,fontSize:11,marginTop:4,color:"var(--ink-light)"}}>Every {schD.map(d=>DAYS[d]).join(", ")}</p>
         </div>
+        {addr(st)&&<p style={{...BODY,fontSize:12,marginTop:10,lineHeight:1.4}}>📌 {addr(st)}</p>}
         <p style={{...BODY,fontSize:12,marginTop:12,textAlign:"center"}}>Signups open when the show starts. Check back then!</p>
       </>:st.archived?<>
         <div style={{marginTop:18,padding:"14px 16px",background:"var(--paper-warm)",border:"2px dashed var(--ink-faded)",borderRadius:2}}>
           <p style={{...BODY,margin:0}}>This open mic has ended. Check back later or find another venue.</p>
         </div>
       </>:<>
-        {st.geofenceEnabled&&<p style={{...BODY,fontSize:12,marginTop:8}}>📍 Must be at venue</p>}
+        {addr(st)&&<p style={{...BODY,fontSize:12,marginTop:8,lineHeight:1.4}}>📌 {addr(st)}</p>}
+        {st.geofenceEnabled&&<p style={{...BODY,fontSize:12,marginTop:4,color:"var(--coral)"}}>📍 Must be at venue to sign up</p>}
         {st.scheduleEnabled&&<p style={{...BODY,fontSize:12,marginTop:4}}>🕐 {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(shH,shM)}</p>}
         <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:24}}>
           <button style={{...BTN,width:"100%"}} onClick={()=>{setVw("signup");setStep("form");geo.check()}}>SIGN UP TO PERFORM →</button>
@@ -312,7 +363,7 @@ function VenuePage({slug:SL,go}){
   return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{...CARD,marginTop:30}} className="drift">
       <p style={SUB}>{st.eventName}</p><h2 style={{...TITLE,fontSize:24,marginTop:4}}>Sign Up</h2>
-      {al&&(step==="form"||step==="edit"||step==="editlink"||step==="repick"||step==="linkPrompt")?(
+      {al&&!(me&&me.pending)&&(step==="form"||step==="edit"||step==="editlink"||step==="repick"||step==="linkPrompt")?(
         step==="linkPrompt"?<div style={{borderTop:"2px solid var(--teal)",marginTop:16,paddingTop:16}}>
           <p style={{fontWeight:700,fontSize:16,color:"var(--teal)"}}>🎤 You're in!</p><p style={BODY}>Add a link?</p>
           <input style={{...INP,marginTop:10}} placeholder="instagram, website…" value={sL} onChange={e=>setSL2(e.target.value)}/>
@@ -329,7 +380,7 @@ function VenuePage({slug:SL,go}){
           <div style={{display:"flex",flexDirection:"column",gap:3,marginTop:10}}>
             {Array.from({length:st.totalSlots},(_,i)=>{const n=i+1,p=st.slots[String(n)],isMe=me&&n===me.slotNum,past=st.currentSlot>0&&n<=st.currentSlot;
               if(isMe)return<div key={n} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:"#fff3c4",borderRadius:2,border:"2px solid var(--coral)"}}><span style={{fontFamily:"'Overpass Mono',monospace",fontWeight:700,width:24,textAlign:"center"}}>{n}</span><span style={{fontWeight:600}}>You ({p.name})</span></div>;
-              if(p||past)return<div key={n} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 12px",opacity:past?0.25:0.5,borderRadius:2}}><span style={{fontFamily:"'Overpass Mono',monospace",width:24,textAlign:"center",color:"var(--ink-light)"}}>{n}</span><span style={{color:"var(--ink-light)",fontSize:13}}>{p?p.name:"passed"}</span></div>;
+              if(p||past)return<div key={n} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 12px",opacity:past?0.25:0.5,borderRadius:2}}><span style={{fontFamily:"'Overpass Mono',monospace",width:24,textAlign:"center",color:"var(--ink-light)"}}>{n}</span><span style={{color:"var(--ink-light)",fontSize:13,fontStyle:p?.pending?"italic":"normal"}}>{p?(p.pending?"reserving…":p.name):"passed"}</span></div>;
               return<button key={n} onClick={()=>repick(n)} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",background:"var(--cream)",border:"2px dashed var(--ink-faded)",borderRadius:2,cursor:"pointer",width:"100%",textAlign:"left"}}
                 onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--ink)";e.currentTarget.style.borderStyle="solid"}}onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--ink-faded)";e.currentTarget.style.borderStyle="dashed"}}>
                 <span style={{fontFamily:"'Overpass Mono',monospace",fontWeight:700,width:24,textAlign:"center"}}>{n}</span><span style={{color:"var(--ink-mid)",fontSize:13}}>open — tap to move</span></button>})}
@@ -347,8 +398,6 @@ function VenuePage({slug:SL,go}){
               <button style={BTN_SM} onClick={startEdit}>edit info</button>
               {me&&rps.length>0&&<button style={{...BTN_SM,background:"var(--paper)"}} onClick={()=>setStep("repick")}>change slot</button>}
             </div>
-            {nP!=="granted"&&nP!=="unsupported"&&<button style={{...BTN2,width:"100%",marginTop:12,fontSize:13}} onClick={enNotif}>🔔 NOTIFY WHEN ON DECK</button>}
-            {nP==="granted"&&<p style={{...BODY,fontSize:12,color:"var(--teal)",marginTop:10}}>🔔 Notifications on</p>}
           </div>})()
       ):!st.signupOpen?<div style={{marginTop:16}}><p style={{...BODY,color:"var(--coral)"}}>Sign-ups are closed.</p>{st.scheduleEnabled&&<p style={{...BODY,marginTop:4}}>Next: {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(...showTime(st))}</p>}</div>
       :gC?<div style={{textAlign:"center",margin:"30px 0"}}><p style={BODY}>📡 Checking location…</p></div>
@@ -357,22 +406,41 @@ function VenuePage({slug:SL,go}){
       :step==="form"?<div style={{marginTop:16}}>
         <p style={BODY}>{cnt}/{st.totalSlots} slots · {ps.length} open{st.waitlist.length>0?` · ${st.waitlist.length} waitlisted`:""}</p>
         <p style={{...BODY,fontSize:12,color:"var(--coral)",marginTop:2}}>{st.limitMode==="time"?`${st.timePerSlot} min`:`${st.songsPerSlot} song${st.songsPerSlot!==1?"s":""}`} per act</p>
-        <input style={{...INP,marginTop:12}} placeholder="your name" value={sN} onChange={e=>setSN(e.target.value)}/>
-        <button style={{...BTN,width:"100%",marginTop:12}} onClick={signupNext}>{ps.length===0?"JOIN WAITLIST":"PICK YOUR SLOT →"}</button>
-        <p style={{...BODY,fontSize:11,textAlign:"center",marginTop:8}}>One per device. Be at the venue.</p>
-      </div>:<div style={{marginTop:16}}>
-        <p style={BODY}>Pick a slot, <strong>{sN}</strong></p>
-        <div style={{display:"flex",flexDirection:"column",gap:3,marginTop:10}}>
-          {Array.from({length:st.totalSlots},(_,i)=>{const n=i+1,p=st.slots[String(n)],past=st.currentSlot>0&&n<=st.currentSlot;
-            if(p)return<div key={n} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",background:"var(--paper)",borderRadius:2,border:"1px solid var(--ink-faded)",opacity:past?0.25:0.5}}><span style={{fontFamily:"'Overpass Mono',monospace",fontWeight:700,width:24,textAlign:"center",color:"var(--ink-light)"}}>{n}</span><span style={{color:"var(--ink-light)",fontSize:13}}>{p.name}</span><span style={{...BODY,fontSize:11,marginLeft:"auto"}}>{past?"done":"taken"}</span></div>;
-            if(past)return<div key={n} style={{padding:"4px 12px",opacity:0.2}}><span style={{fontFamily:"'Overpass Mono',monospace",fontSize:13,color:"var(--ink-faded)"}}>{n}</span></div>;
-            return<button key={n} onClick={()=>pickSlot(n)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:"var(--cream)",border:"2px dashed var(--ink-faded)",borderRadius:2,cursor:"pointer",width:"100%",textAlign:"left",transition:"all .1s"}}
-              onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--ink)";e.currentTarget.style.borderStyle="solid";e.currentTarget.style.background="#fff8e8"}}
-              onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--ink-faded)";e.currentTarget.style.borderStyle="dashed";e.currentTarget.style.background="var(--cream)"}}>
-              <span style={{fontFamily:"'Overpass Mono',monospace",fontWeight:700,width:24,textAlign:"center"}}>{n}</span><span style={{color:"var(--ink-mid)",fontSize:13}}>open — tap to claim</span></button>})}
-        </div><button style={{...LINK,marginTop:8}} onClick={()=>setStep("form")}>← back</button>
-      </div>}
-      <button style={LINK} onClick={()=>{setVw("landing");setStep("form")}}>← back</button>
+        {ps.length===0?<>
+          <p style={{...BODY,marginTop:14,textAlign:"center"}}>Slots are full, but you can join the waitlist.</p>
+          <button style={{...BTN,width:"100%",marginTop:10}} onClick={joinWaitlist}>JOIN WAITLIST →</button>
+        </>:<>
+          <p style={{...BODY,fontSize:12,marginTop:12}}>Pick an open slot to reserve it. You'll enter your name next.</p>
+          <div style={{display:"flex",flexDirection:"column",gap:3,marginTop:10}}>
+            {Array.from({length:st.totalSlots},(_,i)=>{const n=i+1,p=st.slots[String(n)],past=st.currentSlot>0&&n<=st.currentSlot;
+              if(p)return<div key={n} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",background:"var(--paper)",borderRadius:2,border:"1px solid var(--ink-faded)",opacity:past?0.25:0.5}}><span style={{fontFamily:"'Overpass Mono',monospace",fontWeight:700,width:24,textAlign:"center",color:"var(--ink-light)"}}>{n}</span><span style={{color:"var(--ink-light)",fontSize:13,fontStyle:p.pending?"italic":"normal"}}>{p.pending?"reserving…":p.name}</span><span style={{...BODY,fontSize:11,marginLeft:"auto"}}>{past?"done":"taken"}</span></div>;
+              if(past)return<div key={n} style={{padding:"4px 12px",opacity:0.2}}><span style={{fontFamily:"'Overpass Mono',monospace",fontSize:13,color:"var(--ink-faded)"}}>{n}</span></div>;
+              return<button key={n} onClick={()=>pickSlot(n)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:"var(--cream)",border:"2px dashed var(--ink-faded)",borderRadius:2,cursor:"pointer",width:"100%",textAlign:"left",transition:"all .1s"}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--ink)";e.currentTarget.style.borderStyle="solid";e.currentTarget.style.background="#fff8e8"}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--ink-faded)";e.currentTarget.style.borderStyle="dashed";e.currentTarget.style.background="var(--cream)"}}>
+                <span style={{fontFamily:"'Overpass Mono',monospace",fontWeight:700,width:24,textAlign:"center"}}>{n}</span><span style={{color:"var(--ink-mid)",fontSize:13}}>open — tap to claim</span></button>})}
+          </div>
+        </>}
+        <p style={{...BODY,fontSize:11,textAlign:"center",marginTop:10}}>One per device. Be at the venue.</p>
+      </div>
+      :step==="name"?<div style={{marginTop:16}}>
+        <div style={{background:"#fff8e8",border:"2px solid var(--coral)",borderRadius:2,padding:"10px 14px",marginBottom:14}}>
+          <p style={{...SUB,color:"var(--coral)",margin:"0 0 2px",fontSize:10}}>SLOT #{me?.slotNum} RESERVED</p>
+          <p style={{...BODY,fontSize:12,margin:0}}>Hold tight — finish signing up to keep it.</p>
+        </div>
+        <label style={SUB}>YOUR NAME</label>
+        <input style={{...INP,marginTop:6}} placeholder="what should we call you?" value={sN} onChange={e=>setSN(e.target.value)} autoFocus onKeyDown={e=>{if(e.key==="Enter")submitName()}}/>
+        <button style={{...BTN,width:"100%",marginTop:12}} onClick={submitName}>{st.allowLinks?"NEXT →":"LOCK IT IN →"}</button>
+        <button style={{...LINK,color:"var(--coral)",marginTop:8}} onClick={releaseSlot}>← release slot &amp; go back</button>
+      </div>
+      :step==="waitlistName"?<div style={{marginTop:16}}>
+        <p style={BODY}>All slots are taken. Join the waitlist and we'll grab you a spot if anyone drops.</p>
+        <label style={{...SUB,marginTop:14,display:"block"}}>YOUR NAME</label>
+        <input style={{...INP,marginTop:6}} placeholder="what should we call you?" value={sN} onChange={e=>setSN(e.target.value)} autoFocus onKeyDown={e=>{if(e.key==="Enter")submitWaitlistName()}}/>
+        <button style={{...BTN,width:"100%",marginTop:12}} onClick={submitWaitlistName}>JOIN WAITLIST</button>
+        <button style={{...LINK,marginTop:8}} onClick={()=>{setSN("");setStep("form")}}>← back</button>
+      </div>:null}
+      <button style={LINK} onClick={()=>{if(me&&me.pending){const s={...st.slots};delete s[String(me.slotNum)];persist({...st,slots:s})}setVw("landing");setStep("form")}}>← back</button>
     </div>
   </div>)}
 
@@ -381,6 +449,7 @@ function VenuePage({slug:SL,go}){
     <div style={{...CARD,marginTop:30}} className="drift">
       <p style={SUB}>{st.eventName}</p><h2 style={{...TITLE,fontSize:24,marginTop:4}}>Lineup</h2>
       <p style={{...BODY,fontSize:12,marginTop:4}}>📅 {fD(st.showDate||Date.now())} · {cnt} acts · {st.limitMode==="time"?`${st.timePerSlot}min`:`${st.songsPerSlot} songs`}/act</p>
+      {addr(st)&&<p style={{...BODY,fontSize:12,marginTop:4,lineHeight:1.4}}>📌 {addr(st)}</p>}
       {curP2&&<div style={{marginTop:16,padding:16,background:"#fff8e8",border:"2px solid var(--coral)",borderRadius:2}}>
         <p style={{...SUB,color:"var(--coral)",margin:"0 0 4px"}}>NOW ON STAGE — #{st.currentSlot}</p>
         <p style={{fontFamily:"'Fraunces',serif",fontSize:24,fontWeight:900}}>{curP2.name}</p>
@@ -390,7 +459,7 @@ function VenuePage({slug:SL,go}){
       <div style={{marginTop:16}}>{Array.from({length:st.totalSlots},(_,i)=>{const n=i+1,p=st.slots[String(n)],cur=n===st.currentSlot,done=st.currentSlot>0&&n<st.currentSlot&&p,od=n===odS;
         return<div key={n} style={{padding:"6px 10px",marginBottom:2,display:"flex",alignItems:"center",gap:8,borderRadius:2,background:cur?"#fff8e8":od?"#e8f6f0":"transparent",opacity:done?0.3:p?1:0.15,borderLeft:`3px solid ${cur?"var(--coral)":od?"var(--teal)":"transparent"}`}}>
           <span style={{fontFamily:"'Overpass Mono',monospace",fontSize:13,fontWeight:700,width:24,textAlign:"center",color:cur?"var(--coral)":p?"var(--ink-mid)":"var(--ink-faded)"}}>{n}</span>
-          {p?<div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",minWidth:0}}><span style={{fontSize:14,fontWeight:cur?700:400}}>{p.name}</span>{st.allowLinks&&p.link&&<a href={eUrl(p.link)} target="_blank" rel="noopener" style={{color:"var(--teal)",fontSize:11,textDecoration:"none"}}>🔗</a>}</div>:<span style={{fontSize:12,fontStyle:"italic",color:"var(--ink-faded)"}}>—</span>}
+          {p?<div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",minWidth:0}}><span style={{fontSize:14,fontWeight:cur?700:400,fontStyle:p.pending?"italic":"normal",color:p.pending?"var(--ink-light)":"inherit"}}>{p.pending?"reserving…":p.name}</span>{st.allowLinks&&p.link&&<a href={eUrl(p.link)} target="_blank" rel="noopener" style={{color:"var(--teal)",fontSize:11,textDecoration:"none"}}>🔗</a>}</div>:<span style={{fontSize:12,fontStyle:"italic",color:"var(--ink-faded)"}}>—</span>}
         </div>})}</div>
       {st.signupOpen&&<button style={{...BTN,width:"100%",marginTop:14}} onClick={()=>{setVw("signup");setStep("form");geo.check()}}>SIGN UP</button>}
       <button style={LINK} onClick={()=>setVw("landing")}>← back</button>
@@ -409,10 +478,10 @@ function HostPage({slug:SL,go}){
   const refresh=useCallback(async()=>{const v=await ldV(SL);if(v)setSt(p=>({...p,...v}));setLd(true)},[SL]);
   useEffect(()=>{refresh();const id=setInterval(refresh,4000);return()=>clearInterval(id)},[refresh]);
   const persist=useCallback(async n=>{setSt(n);await svV(SL,n)},[SL]);
-  useSch(st,persist);useOD(st);
+  useSch(st,persist);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   if(!ld)return<div style={PAGE}><style>{CSS}</style><p style={BODY}>loading…</p></div>;
-  if(!auth){const tryP=()=>{if(pinIn===st.hostPin){setAuth(true);setPinIn("")}else flash("Wrong PIN")};
+  if(!auth){const tryP=()=>{if(pinIn===st.hostPin){setAuth(true);setPinIn("");addMyVenue(SL)}else flash("Wrong PIN")};
     return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
       <div style={{...CARD,marginTop:60,textAlign:"center"}} className="drift">
         <div style={{fontSize:36,marginBottom:8}}>🔒</div><h2 style={{...TITLE,fontSize:24}}>Host Panel</h2><p style={{...BODY,marginTop:4}}>{st.eventName}</p>
@@ -429,10 +498,12 @@ function HostPage({slug:SL,go}){
   const hostAdd=()=>{if(!aN.trim()){flash("Enter name");return}const sl=lowOpen(st.slots,st.totalSlots);if(!sl){flash("Full!");return}persist({...st,slots:{...st.slots,[String(sl)]:{id:gid(),name:aN.trim(),deviceId:"host",time:Date.now()}},showDate:st.showDate||Date.now()});flash(`Added #${sl}`);setAN("")};
   const resetShow=()=>persist({...st,slots:{},waitlist:[],currentSlot:0,signupOpen:false,showDate:null,manualOverride:false,performedDevices:[]});
   const togDay=d=>{const dy=[...schD];const i=dy.indexOf(d);if(i>=0)dy.splice(i,1);else dy.push(d);dy.sort((a,b)=>a-b);persist({...st,scheduleDays:dy})};
-  const setVGPS=()=>{if(!navigator.geolocation){flash("No geolocation");return}flash("Getting location…");navigator.geolocation.getCurrentPosition(p=>{persist({...st,venueLat:p.coords.latitude,venueLng:p.coords.longitude,geofenceEnabled:true,venueName:"Current location"});flash("Set!")},()=>flash("Failed"),{enableHighAccuracy:true,timeout:10000})};
+  const setVGPS=()=>{if(!navigator.geolocation){flash("No geolocation");return}flash("Getting location…");navigator.geolocation.getCurrentPosition(p=>{persist({...st,venueLat:p.coords.latitude,venueLng:p.coords.longitude,venueAddress:st.venueAddress||"Current location"});flash("Pinned to current location!")},()=>flash("Failed"),{enableHighAccuracy:true,timeout:10000})};
   const searchAddr=async()=>{if(!aQ.trim())return;setAL2(true);setAR([]);try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(aQ.trim())}`);const d=await r.json();setAR(d.map(r=>({name:r.display_name,lat:parseFloat(r.lat),lng:parseFloat(r.lon)})));if(d.length===0)flash("No results")}catch{flash("Search failed")}setAL2(false)};
-  const setVFrom=r=>{persist({...st,venueLat:r.lat,venueLng:r.lng,geofenceEnabled:true,venueName:r.name});setAR([]);setAQ("");flash("Venue set!")};
+  const setVFrom=r=>{persist({...st,venueLat:r.lat,venueLng:r.lng,venueAddress:r.name});setAR([]);setAQ("");flash("Address saved!")};
+  const clearAddr=()=>{persist({...st,venueAddress:"",venueLat:null,venueLng:null,geofenceEnabled:false});flash("Cleared")};
   const copyLink=()=>{const b=window.location.href.replace(/#.*$/,"");navigator.clipboard?.writeText(`${b}#${SL}`);flash("Link copied!")};
+  const copyHostLink=()=>{const b=window.location.href.replace(/#.*$/,"");navigator.clipboard?.writeText(`${b}#${SL}/host`);flash("Host link copied!")};
   return(<div style={{...PAGE,alignItems:"center",paddingTop:16}}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{...CARD,maxWidth:540,width:"100%"}} className="drift">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
@@ -442,13 +513,18 @@ function HostPage({slug:SL,go}){
       <div style={{display:"flex",borderRadius:2,overflow:"hidden",border:"2px solid var(--ink)",marginBottom:16}}>
         {[["show","SHOW"],["settings","SETTINGS"]].map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{flex:1,padding:"10px 0",border:"none",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Overpass Mono',monospace",letterSpacing:1,background:tab===k?"var(--ink)":"var(--cream)",color:tab===k?"var(--cream)":"var(--ink-mid)"}}>{l}</button>)}
       </div>
-      {st.archived&&<div style={{background:"#fbeae6",border:"2px dashed var(--coral)",borderRadius:2,padding:"12px 14px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-        <div style={{flex:1,minWidth:0}}><p style={{...SUB,color:"var(--coral)",margin:0}}>ENDED</p><p style={{...BODY,fontSize:12,marginTop:2}}>Hidden from the directory. Restore to make it public again.</p></div>
-        <button style={{...BTN_SM,background:"var(--teal)",color:"var(--cream)",borderColor:"var(--teal)"}} onClick={()=>{persist({...st,archived:false});flash("Restored!")}}>↻ RESTORE</button>
+      {st.archived&&<div style={{background:"#fbeae6",border:"2px dashed var(--coral)",borderRadius:2,padding:"14px 16px",marginBottom:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:10}}>
+          <p style={{...SUB,color:"var(--coral)",margin:0}}>ENDED · BOOKMARK THIS PAGE</p>
+          <button style={{...BTN_SM,background:"var(--teal)",color:"var(--cream)",borderColor:"var(--teal)"}} onClick={()=>{persist({...st,archived:false});flash("Restored!")}}>↻ RESTORE</button>
+        </div>
+        <p style={{...BODY,fontSize:12,marginBottom:10}}>Hidden from the directory. To re-host this same open mic later, bookmark this page now — it's the only way back in.</p>
+        <div style={{background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2,padding:"8px 10px",marginBottom:8,fontFamily:"'Overpass Mono',monospace",fontSize:11,color:"var(--ink)",wordBreak:"break-all",lineHeight:1.5}}>{typeof window!=="undefined"?`${window.location.origin}/#${SL}/host`:`/#${SL}/host`}</div>
+        <button style={{...BTN_SM,width:"100%"}} onClick={copyHostLink}>📋 COPY HOST URL</button>
       </div>}
       {tab==="show"&&<>
         {st.scheduleEnabled&&<div style={{background:"#e8f6f0",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:12,margin:0,color:"var(--teal)",fontWeight:600}}>⏰ {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} → show {fT(...showTime(st))}{inSch(st)===true?" · OPEN":" · Closed"}{st.manualOverride?" · MANUAL":""}</p></div>}
-        {st.geofenceEnabled&&st.venueLat&&<div style={{background:"#fff8e8",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--ink-faded)"}}><p style={{...BODY,fontSize:12,margin:0}}>📍 Geofence {st.venueRadius}m{st.venueName?` · ${st.venueName.split(",")[0]}`:""}</p></div>}
+        {st.geofenceEnabled&&st.venueLat&&<div style={{background:"#fff8e8",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--ink-faded)"}}><p style={{...BODY,fontSize:12,margin:0}}>📍 Geofence {st.venueRadius}m{addr(st)?` · ${shortAddr(addr(st),60)}`:""}</p></div>}
         <div style={{display:"flex",gap:8,marginBottom:10}}>
           <button style={{...BTN,flex:1,background:st.signupOpen?"var(--coral)":"var(--teal)",borderColor:st.signupOpen?"var(--coral)":"var(--teal)",color:"var(--cream)"}} onClick={togSignup}>{st.signupOpen?"🔒 CLOSE":"🔓 OPEN"} SIGNUP</button>
           <button style={{...BTN2,flexShrink:0,padding:"10px 14px"}} onClick={copyLink} title="Copy link">📋</button>
@@ -470,7 +546,7 @@ function HostPage({slug:SL,go}){
           <p style={{...SUB,color:"var(--coral)",margin:"0 0 10px"}}>DANGER ZONE</p>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <button style={{...BTN_SM,background:"var(--cream)",color:"var(--coral)",borderColor:"var(--coral)"}} onClick={()=>{if(confirm("Clear tonight's lineup? The venue stays active."))resetShow()}}>↺ RESET SHOW</button>
-            <button style={{...BTN_SM,background:"var(--coral)",color:"var(--cream)",borderColor:"var(--coral)",boxShadow:"2px 2px 0 var(--ink)"}} onClick={()=>{if(confirm("End this open mic? It'll be removed from the directory. You can restore it anytime from this page."))persist({...st,archived:true,signupOpen:false})}}>✕ END OPEN MIC</button>
+            <button style={{...BTN_SM,background:"var(--coral)",color:"var(--cream)",borderColor:"var(--coral)",boxShadow:"2px 2px 0 var(--ink)"}} onClick={()=>{if(confirm("End this open mic?\n\nIt'll be removed from the directory. IMPORTANT: bookmark this page before leaving — it's how you'll get back to restore it later."))persist({...st,archived:true,signupOpen:false})}}>✕ END OPEN MIC</button>
           </div>
           <p style={{...BODY,fontSize:11,marginTop:8}}>Reset clears tonight's performers. End hides the venue from the public directory (link still works).</p>
         </div>
@@ -486,14 +562,32 @@ function HostPage({slug:SL,go}){
           {st.limitMode==="time"?<><label style={SUB}>MINUTES PER ACT</label><NumInput style={{marginTop:6}} value={st.timePerSlot} min={1} max={30} onChange={v=>persist({...st,timePerSlot:v})}/></>:<><label style={SUB}>SONGS PER ACT</label><NumInput style={{marginTop:6}} value={st.songsPerSlot} min={1} max={10} onChange={v=>persist({...st,songsPerSlot:v})}/></>}
         </div>
         <div style={{...SECT,marginTop:12}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🔗 PERFORMER LINKS</p><Toggle on={st.allowLinks} onToggle={()=>persist({...st,allowLinks:!st.allowLinks})}/></div></div>
+
+        <div style={{...SECT,marginTop:12}}>
+          <p style={{...SUB,margin:"0 0 4px"}}>📌 VENUE ADDRESS</p>
+          <p style={{...BODY,fontSize:11,marginBottom:10}}>Shown to performers and on the venue listing. Optional.</p>
+          {addr(st)?<div style={{background:"var(--paper-warm)",border:"1px solid var(--ink-faded)",borderRadius:2,padding:"10px 12px",marginBottom:10}}>
+            <p style={{...BODY,fontSize:13,margin:0,color:"var(--ink)",lineHeight:1.4}}>{addr(st)}</p>
+            {st.venueLat&&<p style={{...BODY,fontSize:10,margin:"4px 0 0",color:"var(--ink-light)",fontFamily:"'Overpass Mono',monospace"}}>📍 pinned · {st.venueLat.toFixed(4)}, {st.venueLng.toFixed(4)}</p>}
+            <button style={{...BTN_GHOST,color:"var(--coral)",fontSize:11,marginTop:4,padding:0}} onClick={clearAddr}>clear address</button>
+          </div>:null}
+          <label style={SUB}>SEARCH &amp; PIN</label>
+          <div style={{display:"flex",gap:6,marginTop:6,marginBottom:8}}>
+            <input style={{...INP,flex:1}} placeholder="address or venue name" value={aQ} onChange={e=>setAQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&searchAddr()}/>
+            <button style={BTN_SM} onClick={searchAddr} disabled={aL}>{aL?"…":"🔍"}</button>
+          </div>
+          {aR.length>0&&<div style={{marginBottom:10}}>{aR.map((r,i)=><button key={i} onClick={()=>setVFrom(r)} style={{display:"block",width:"100%",padding:"8px 10px",marginBottom:3,background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2,color:"var(--ink)",fontSize:12,textAlign:"left",cursor:"pointer",lineHeight:1.4}}>📍 {r.name}</button>)}</div>}
+          <label style={{...SUB,marginTop:10,display:"block"}}>OR TYPE FREELY</label>
+          <input style={{...INP,marginTop:6}} placeholder="e.g. 'Joe's Bar, upstairs'" value={st.venueAddress||""} onChange={e=>persist({...st,venueAddress:e.target.value})}/>
+          <p style={{...BODY,fontSize:11,marginTop:6}}>Free text is displayed only — for location lock, use search above to pin coordinates.</p>
+        </div>
+
         <div style={{...SECT,marginTop:12,border:st.geofenceEnabled?"2px solid var(--ink-faded)":"1px solid var(--ink-faded)"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>📍 LOCATION LOCK</p><Toggle on={st.geofenceEnabled} onToggle={()=>persist({...st,geofenceEnabled:!st.geofenceEnabled})}/></div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>📍 LOCATION LOCK</p><Toggle on={st.geofenceEnabled} onToggle={()=>{if(!st.geofenceEnabled&&!st.venueLat){flash("Pin an address first");return}persist({...st,geofenceEnabled:!st.geofenceEnabled})}}/></div>
+          <p style={{...BODY,fontSize:11,marginTop:6}}>Performers must be within the radius to sign up.</p>
           {st.geofenceEnabled&&<div style={{marginTop:12}}>
-            <label style={SUB}>SEARCH VENUE</label>
-            <div style={{display:"flex",gap:6,marginTop:6,marginBottom:8}}><input style={{...INP,flex:1}} placeholder="address or name" value={aQ} onChange={e=>setAQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&searchAddr()}/><button style={BTN_SM} onClick={searchAddr} disabled={aL}>{aL?"…":"🔍"}</button></div>
-            {aR.length>0&&<div style={{marginBottom:10}}>{aR.map((r,i)=><button key={i} onClick={()=>setVFrom(r)} style={{display:"block",width:"100%",padding:"8px 10px",marginBottom:3,background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2,color:"var(--ink)",fontSize:12,textAlign:"left",cursor:"pointer"}}>📍 {r.name.length>80?r.name.slice(0,80)+"…":r.name}</button>)}</div>}
-            <button style={{...BTN_SM,width:"100%",marginBottom:10}} onClick={setVGPS}>📡 USE CURRENT LOCATION</button>
-            {st.venueLat&&<div style={{background:"#e8f6f0",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--teal)"}}><p style={{...BODY,margin:0,fontSize:12,color:"var(--teal)"}}>✓ Venue set{st.venueName?` — ${st.venueName.split(",").slice(0,2).join(",")}`:""}</p></div>}
+            {!st.venueLat&&<div style={{background:"#fbeae6",border:"1px solid var(--coral)",borderRadius:2,padding:"8px 10px",marginBottom:10}}><p style={{...BODY,fontSize:12,margin:0,color:"var(--coral)"}}>⚠ No coordinates pinned. Use the search above to pin an address, or:</p></div>}
+            <button style={{...BTN_SM,width:"100%",marginBottom:10}} onClick={setVGPS}>📡 PIN CURRENT LOCATION</button>
             <label style={SUB}>RADIUS (m)</label><NumInput style={{marginTop:6}} value={st.venueRadius} min={20} max={2000} onChange={v=>persist({...st,venueRadius:v})}/>
           </div>}
         </div>
