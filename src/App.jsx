@@ -22,6 +22,10 @@ async function ldIdx() {
 }
 async function svIdx() { /* no-op — list comes from venues collection */ }
 
+// ─── Cleanup thresholds ───────────────────────────────────────────
+const SIX_MONTHS_MS = 1000 * 60 * 60 * 24 * 180;
+const WARN_WINDOW_MS = 1000 * 60 * 60 * 24 * 14; // show warning in last 2 weeks
+
 // ─── My Venues (local device tracking) ────────────────────────────
 const MY_KEY = "omic-my-v1";
 function myVenues() { try { return JSON.parse(localStorage.getItem(MY_KEY) || "[]") } catch { return [] } }
@@ -31,7 +35,7 @@ function removeMyVenue(slug) { try { localStorage.setItem(MY_KEY, JSON.stringify
 // ─── Utils ────────────────────────────────────────────────────────
 const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MO=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",archived:false};
+const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",archived:false,createdAt:0,lastHostSeen:0};
 
 function gid(){return Math.random().toString(36).slice(2,10)+Date.now().toString(36)}
 function slug(s){return s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,48)}
@@ -49,6 +53,9 @@ function findDev(sl,d){for(const[k,v]of Object.entries(sl))if(v&&v.deviceId===d)
 function nextF(sl,tot,cur){for(let i=cur+1;i<=tot;i++)if(sl[String(i)])return i;return null}
 function lowOpen(sl,tot){for(let i=1;i<=tot;i++)if(!sl[String(i)])return i;return null}
 function eUrl(s){if(!s)return"";const t=s.trim();return/^https?:\/\//i.test(t)?t:"https://"+t}
+// For cleanup: returns effective "last host activity" timestamp. Grandfather
+// existing venues by pretending they were just seen if they have no stamp.
+function lastSeen(v,graceFrom){if(v.lastHostSeen)return v.lastHostSeen;if(v.createdAt)return v.createdAt;return graceFrom}
 function addr(s){return(s.venueAddress||s.venueName||"").trim()}
 function shortAddr(a,n){if(!a)return"";return a.length>n?a.slice(0,n-1)+"…":a}
 function mvSlot(si,tot,f,t){if(f===t)return si;const s={...si},p=s[String(f)];if(!p)return si;delete s[String(f)];if(!s[String(t)]){s[String(t)]=p;return s}let ed=null,eu=null;for(let i=t+1;i<=tot;i++){if(!s[String(i)]){ed=i;break}}for(let i=t-1;i>=1;i--){if(!s[String(i)]){eu=i;break}}const dd=t>f,ud=dd?(ed!==null):(eu===null);if(ud&&ed!==null){for(let i=ed;i>t;i--)s[String(i)]=s[String(i-1)]||null}else if(!ud&&eu!==null){for(let i=eu;i<t;i++)s[String(i)]=s[String(i+1)]||null}else if(ed!==null){for(let i=ed;i>t;i--)s[String(i)]=s[String(i-1)]||null}else if(eu!==null){for(let i=eu;i<t;i++)s[String(i)]=s[String(i+1)]||null}s[String(t)]=p;for(let i=1;i<=tot;i++)if(!s[String(i)])delete s[String(i)];return s}
@@ -178,7 +185,13 @@ function useSch(st,persist){const ref=useRef(st);ref.current=st;useEffect(()=>{i
 function DirPage({go}){
   const[venues,setV]=useState([]);const[ld,setLd]=useState(true);
   const[q,setQ]=useState("");const[mine,setMine]=useState([]);
-  useEffect(()=>{(async()=>{const idx=await ldIdx();const all=[];for(const e of idx){const v=await ldV(e.slug);if(v)all.push({slug:e.slug,...v})}setV(all);setLd(false);setMine(myVenues())})()},[]);
+  useEffect(()=>{(async()=>{
+    const idx=await ldIdx();const all=[];const now=Date.now();const graceFrom=now;const stale=[];
+    for(const e of idx){const v=await ldV(e.slug);if(!v)continue;const ls=lastSeen(v,graceFrom);if(now-ls>SIX_MONTHS_MS)stale.push(e.slug);else all.push({slug:e.slug,...v})}
+    setV(all);setLd(false);setMine(myVenues());
+    // fire-and-forget cleanup of stale venues
+    for(const s of stale){try{await dlV(s);removeMyVenue(s)}catch{}}
+  })()},[]);
   const ql=q.trim().toLowerCase();
   const searching=ql.length>0;
   const matches=searching?venues.filter(v=>v.eventName?.toLowerCase().includes(ql)||v.slug.toLowerCase().includes(ql)):[];
@@ -248,7 +261,7 @@ function CreatePage({go}){
   const[limMode,setLimMode]=useState("time");const[spp,setSpp]=useState(2);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   useEffect(()=>{if(!cust)setSl(slug(name))},[name,cust]);
-  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts};await svV(sl,v);const idx=await ldIdx();addMyVenue(sl);go(`${sl}/host`)};
+  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const now=Date.now();const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts,createdAt:now,lastHostSeen:now};await svV(sl,v);const idx=await ldIdx();addMyVenue(sl);go(`${sl}/host`)};
   return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{maxWidth:460,width:"100%",marginTop:30}}>
       <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
@@ -314,6 +327,13 @@ function VenuePage({slug:SL,go}){
     flash("Waitlisted!");setSN("");setStep("form");
   };
   const releaseSlot=()=>{if(me){const s={...st.slots};delete s[String(me.slotNum)];persist({...st,slots:s})}setStep("form")};
+  const dropOut=()=>{
+    if(!confirm("Drop out of the lineup?\n\nYou'll lose your spot. You can sign up again later if slots are still open."))return;
+    if(me){const s={...st.slots};delete s[String(me.slotNum)];persist({...st,slots:s})}
+    else if(mw){persist({...st,waitlist:st.waitlist.filter(w=>w.deviceId!==did.current)})}
+    flash("You're out. Thanks for letting us know!");
+    setStep("form");
+  };
   const saveEdit=()=>{if(!eN.trim()){flash("Name can't be empty");return}if(me){persist({...st,slots:{...st.slots,[String(me.slotNum)]:{...st.slots[String(me.slotNum)],name:eN.trim(),link:eL.trim()||null}}})}else if(mw){persist({...st,waitlist:st.waitlist.map(w=>w.deviceId===did.current?{...w,name:eN.trim(),link:eL.trim()||null}:w)})}flash("Updated!");setStep("form")};
   const repick=n=>{if(!me)return;const s={...st.slots};const p={...s[String(me.slotNum)]};delete s[String(me.slotNum)];s[String(n)]=p;persist({...st,slots:s});flash(`Moved to #${n}`);setStep("form")};
   const startEdit=()=>{setEN(al?.name||"");setEL(al?.link||"");setStep("edit")};
@@ -397,6 +417,7 @@ function VenuePage({slug:SL,go}){
             <div style={{display:"flex",gap:8,marginTop:12,flexWrap:"wrap"}}>
               <button style={BTN_SM} onClick={startEdit}>edit info</button>
               {me&&rps.length>0&&<button style={{...BTN_SM,background:"var(--paper)"}} onClick={()=>setStep("repick")}>change slot</button>}
+              {!(me&&st.currentSlot>0&&me.slotNum===st.currentSlot)&&<button style={{...BTN_SM,background:"var(--cream)",color:"var(--coral)",borderColor:"var(--coral)"}} onClick={dropOut}>drop out</button>}
             </div>
           </div>})()
       ):!st.signupOpen?<div style={{marginTop:16}}><p style={{...BODY,color:"var(--coral)"}}>Sign-ups are closed.</p>{st.scheduleEnabled&&<p style={{...BODY,marginTop:4}}>Next: {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(...showTime(st))}</p>}</div>
@@ -481,7 +502,7 @@ function HostPage({slug:SL,go}){
   useSch(st,persist);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   if(!ld)return<div style={PAGE}><style>{CSS}</style><p style={BODY}>loading…</p></div>;
-  if(!auth){const tryP=()=>{if(pinIn===st.hostPin){setAuth(true);setPinIn("");addMyVenue(SL)}else flash("Wrong PIN")};
+  if(!auth){const tryP=()=>{if(pinIn===st.hostPin){setAuth(true);setPinIn("");addMyVenue(SL);persist({...st,lastHostSeen:Date.now()})}else flash("Wrong PIN")};
     return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
       <div style={{...CARD,marginTop:60,textAlign:"center"}} className="drift">
         <div style={{fontSize:36,marginBottom:8}}>🔒</div><h2 style={{...TITLE,fontSize:24}}>Host Panel</h2><p style={{...BODY,marginTop:4}}>{st.eventName}</p>
@@ -497,6 +518,7 @@ function HostPage({slug:SL,go}){
   const rmSlot=n=>{const s={...st.slots};delete s[String(n)];persist({...st,slots:s})};
   const hostAdd=()=>{if(!aN.trim()){flash("Enter name");return}const sl=lowOpen(st.slots,st.totalSlots);if(!sl){flash("Full!");return}persist({...st,slots:{...st.slots,[String(sl)]:{id:gid(),name:aN.trim(),deviceId:"host",time:Date.now()}},showDate:st.showDate||Date.now()});flash(`Added #${sl}`);setAN("")};
   const resetShow=()=>persist({...st,slots:{},waitlist:[],currentSlot:0,signupOpen:false,showDate:null,manualOverride:false,performedDevices:[]});
+  const deleteForever=async()=>{await dlV(SL);removeMyVenue(SL);go("")};
   const togDay=d=>{const dy=[...schD];const i=dy.indexOf(d);if(i>=0)dy.splice(i,1);else dy.push(d);dy.sort((a,b)=>a-b);persist({...st,scheduleDays:dy})};
   const setVGPS=()=>{if(!navigator.geolocation){flash("No geolocation");return}flash("Getting location…");navigator.geolocation.getCurrentPosition(p=>{persist({...st,venueLat:p.coords.latitude,venueLng:p.coords.longitude,venueAddress:st.venueAddress||"Current location"});flash("Pinned to current location!")},()=>flash("Failed"),{enableHighAccuracy:true,timeout:10000})};
   const searchAddr=async()=>{if(!aQ.trim())return;setAL2(true);setAR([]);try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(aQ.trim())}`);const d=await r.json();setAR(d.map(r=>({name:r.display_name,lat:parseFloat(r.lat),lng:parseFloat(r.lon)})));if(d.length===0)flash("No results")}catch{flash("Search failed")}setAL2(false)};
@@ -518,7 +540,7 @@ function HostPage({slug:SL,go}){
           <p style={{...SUB,color:"var(--coral)",margin:0}}>ENDED · BOOKMARK THIS PAGE</p>
           <button style={{...BTN_SM,background:"var(--teal)",color:"var(--cream)",borderColor:"var(--teal)"}} onClick={()=>{persist({...st,archived:false});flash("Restored!")}}>↻ RESTORE</button>
         </div>
-        <p style={{...BODY,fontSize:12,marginBottom:10}}>Hidden from the directory. To re-host this same open mic later, bookmark this page now — it's the only way back in.</p>
+        <p style={{...BODY,fontSize:12,marginBottom:10}}>Hidden from the directory. To re-host this same open mic later, bookmark this page now. </p>
         <div style={{background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2,padding:"8px 10px",marginBottom:8,fontFamily:"'Overpass Mono',monospace",fontSize:11,color:"var(--ink)",wordBreak:"break-all",lineHeight:1.5}}>{typeof window!=="undefined"?`${window.location.origin}/#${SL}/host`:`/#${SL}/host`}</div>
         <button style={{...BTN_SM,width:"100%"}} onClick={copyHostLink}>📋 COPY HOST URL</button>
       </div>}
@@ -549,6 +571,10 @@ function HostPage({slug:SL,go}){
             <button style={{...BTN_SM,background:"var(--coral)",color:"var(--cream)",borderColor:"var(--coral)",boxShadow:"2px 2px 0 var(--ink)"}} onClick={()=>{if(confirm("End this open mic?\n\nIt'll be removed from the directory. IMPORTANT: bookmark this page before leaving — it's how you'll get back to restore it later."))persist({...st,archived:true,signupOpen:false})}}>✕ END OPEN MIC</button>
           </div>
           <p style={{...BODY,fontSize:11,marginTop:8}}>Reset clears tonight's performers. End hides the venue from the public directory (link still works).</p>
+          <div style={{marginTop:14,paddingTop:14,borderTop:"1px dashed var(--ink-faded)"}}>
+            <button style={{...BTN_SM,background:"#2a0a0a",color:"#ff9a88",borderColor:"#2a0a0a",fontSize:11,padding:"7px 12px"}} onClick={()=>{const typed=prompt(`PERMANENT DELETE\n\nThis will erase "${st.eventName}" and everything in it — no way to recover.\n\nType the venue slug to confirm:\n  ${SL}`);if(typed===null)return;if(typed.trim()!==SL){alert("Slug didn't match. Nothing was deleted.");return}deleteForever()}}>☠ DELETE FOREVER</button>
+            <p style={{...BODY,fontSize:11,marginTop:6}}>Permanently wipes the venue. No recovery. Use End Open Mic instead if you might bring it back.</p>
+          </div>
         </div>
       </>}
       {tab==="settings"&&<>
