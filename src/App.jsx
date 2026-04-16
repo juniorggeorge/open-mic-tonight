@@ -7,13 +7,20 @@ import { useState, useEffect, useCallback, useRef } from "react";
 */
 
 // ─── Storage ──────────────────────────────────────────────────────
-async function sGet(k) { try { const r = await window.storage.get(k, true); return r ? JSON.parse(r.value) : null; } catch { return null; } }
-async function sSet(k, v) { try { await window.storage.set(k, JSON.stringify(v), true); } catch {} }
-const IDX = "omic-idx-v2";
-async function ldIdx() { return (await sGet(IDX)) || []; }
-async function svIdx(i) { await sSet(IDX, i); }
-async function ldV(s) { return await sGet(`omic:${s}`); }
-async function svV(s, d) { await sSet(`omic:${s}`, d); }
+import { db, doc, getDoc, setDoc, collection, getDocs } from "./firebase";
+
+async function ldV(s) {
+  const snap = await getDoc(doc(db, "venues", s));
+  return snap.exists() ? snap.data() : null;
+}
+async function svV(s, d) {
+  await setDoc(doc(db, "venues", s), d);
+}
+async function ldIdx() {
+  const snap = await getDocs(collection(db, "venues"));
+  return snap.docs.map(d => ({ slug: d.id, name: d.data().eventName, created: d.data().createdAt || 0 }));
+}
+async function svIdx() { /* no-op — list comes from venues collection */ }
 
 // ─── Utils ────────────────────────────────────────────────────────
 const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
@@ -201,7 +208,7 @@ function CreatePage({go}){
   const[limMode,setLimMode]=useState("time");const[spp,setSpp]=useState(2);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   useEffect(()=>{if(!cust)setSl(slug(name))},[name,cust]);
-  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts};await svV(sl,v);const idx=await ldIdx();idx.push({slug:sl,name:name.trim(),created:Date.now()});await svIdx(idx);go(`${sl}/host`)};
+  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts};await svV(sl,v);const idx=await ldIdx();go(`${sl}/host`)};
   return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{maxWidth:460,width:"100%",marginTop:30}}>
       <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
