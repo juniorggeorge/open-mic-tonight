@@ -7,34 +7,30 @@ import { useState, useEffect, useCallback, useRef } from "react";
 */
 
 // ─── Storage ──────────────────────────────────────────────────────
-import { db, doc, getDoc, setDoc, collection, getDocs } from "./firebase";
-
-async function ldV(s) {
-  const snap = await getDoc(doc(db, "venues", s));
-  return snap.exists() ? snap.data() : null;
-}
-async function svV(s, d) {
-  await setDoc(doc(db, "venues", s), d);
-}
-async function ldIdx() {
-  const snap = await getDocs(collection(db, "venues"));
-  return snap.docs.map(d => ({ slug: d.id, name: d.data().eventName, created: d.data().createdAt || 0 }));
-}
-async function svIdx() { /* no-op — list comes from venues collection */ }
+async function sGet(k) { try { const r = await window.storage.get(k, true); return r ? JSON.parse(r.value) : null; } catch { return null; } }
+async function sSet(k, v) { try { await window.storage.set(k, JSON.stringify(v), true); } catch {} }
+const IDX = "omic-idx-v2";
+async function ldIdx() { return (await sGet(IDX)) || []; }
+async function svIdx(i) { await sSet(IDX, i); }
+async function ldV(s) { return await sGet(`omic:${s}`); }
+async function svV(s, d) { await sSet(`omic:${s}`, d); }
 
 // ─── Utils ────────────────────────────────────────────────────────
 const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MO=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:""};
+const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",archived:false};
 
 function gid(){return Math.random().toString(36).slice(2,10)+Date.now().toString(36)}
 function slug(s){return s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,48)}
 function devId(){let id;try{id=localStorage.getItem("omic-d9")}catch{}if(!id){id=gid();try{localStorage.setItem("omic-d9",id)}catch{}}return id}
 function hav(a,b,c,d){const R=6371000,r=x=>x*Math.PI/180,dL=r(c-a),dN=r(d-b),x=Math.sin(dL/2)**2+Math.cos(r(a))*Math.cos(r(c))*Math.sin(dN/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function fD(ts){if(!ts)return"";const d=new Date(ts);return`${DAYS[d.getDay()]}, ${MO[d.getMonth()]} ${d.getDate()}`}
+function fFull(d,h,m){return`${DAYS[d.getDay()]}, ${MO[d.getMonth()]} ${d.getDate()} at ${fT(h,m)}`}
+function nextOcc(days,h,m){if(!days||!days.length)return null;const now=new Date();const nowMin=now.getHours()*60+now.getMinutes();const showMin=h*60+m;for(let i=0;i<8;i++){const d=new Date(now);d.setDate(now.getDate()+i);if(days.includes(d.getDay())){if(i===0&&nowMin>=showMin)continue;return d}}return null}
 function fT(h,m){return`${h%12||12}:${String(m).padStart(2,"0")} ${h>=12?"PM":"AM"}`}
 function addM(h,m,a){const t=h*60+m+a;return[Math.floor(t/60)%24,t%60]}
-function inSch(s){if(!s.scheduleEnabled)return null;const n=new Date(),dy=s.scheduleDays||[4];if(!dy.includes(n.getDay()))return false;const m=n.getHours()*60+n.getMinutes(),o=s.scheduleOpenHour*60+s.scheduleOpenMin;return m>=o&&m<o+s.scheduleDuration}
+function showTime(s){if(s.scheduleShowHour!=null&&s.scheduleShowMin!=null)return[s.scheduleShowHour,s.scheduleShowMin];return addM(s.scheduleOpenHour,s.scheduleOpenMin,s.scheduleDuration||30)}
+function inSch(s){if(!s.scheduleEnabled)return null;const n=new Date(),dy=s.scheduleDays||[4];if(!dy.includes(n.getDay()))return false;const m=n.getHours()*60+n.getMinutes(),o=s.scheduleOpenHour*60+s.scheduleOpenMin;return m>=o}
 function filled(sl){return Object.keys(sl).filter(k=>sl[k]).map(Number).sort((a,b)=>a-b)}
 function findDev(sl,d){for(const[k,v]of Object.entries(sl))if(v&&v.deviceId===d)return{...v,slotNum:Number(k)};return null}
 function nextF(sl,tot,cur){for(let i=cur+1;i<=tot;i++)if(sl[String(i)])return i;return null}
@@ -160,7 +156,8 @@ function SlotGrid({slots,totalSlots,currentSlot,onDeckSlot,onMove,onRemove,onCle
 
 // ─── Hooks ────────────────────────────────────────────────────────
 function useGeo(st){const[status,setS]=useState("idle");const[dist,setD]=useState(null);const check=useCallback(()=>{if(!st.geofenceEnabled||!st.venueLat){setS("ok");return}if(!navigator.geolocation){setS("unavailable");return}setS("checking");navigator.geolocation.getCurrentPosition(p=>{const d=hav(p.coords.latitude,p.coords.longitude,st.venueLat,st.venueLng);setD(Math.round(d));setS(d<=st.venueRadius?"ok":"too_far")},()=>setS("error"),{enableHighAccuracy:true,timeout:10000})},[st.geofenceEnabled,st.venueLat,st.venueLng,st.venueRadius]);return{status,dist,check}}
-function useSch(st,persist){const ref=useRef(st);ref.current=st;useEffect(()=>{if(!st.scheduleEnabled)return;const tick=()=>{const s=ref.current,so=inSch(s);if(s.manualOverride){if(so===true&&!s.showDate)persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false});return}if(so===true&&!s.signupOpen)persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[]});else if(so===false&&s.signupOpen)persist({...s,signupOpen:false})};tick();const id=setInterval(tick,15000);return()=>clearInterval(id)},[st.scheduleEnabled,JSON.stringify(st.scheduleDays),st.scheduleOpenHour,st.scheduleOpenMin,st.scheduleDuration])}
+function sameDay(a,b){const d1=new Date(a),d2=new Date(b);return d1.getFullYear()===d2.getFullYear()&&d1.getMonth()===d2.getMonth()&&d1.getDate()===d2.getDate()}
+function useSch(st,persist){const ref=useRef(st);ref.current=st;useEffect(()=>{if(!st.scheduleEnabled)return;const tick=()=>{const s=ref.current;if(s.archived)return;const so=inSch(s);const isNewWindow=so===true&&(!s.showDate||!sameDay(s.showDate,Date.now()));if(s.manualOverride){if(isNewWindow)persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false});return}if(isNewWindow)persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[]})};tick();const id=setInterval(tick,15000);return()=>clearInterval(id)},[st.scheduleEnabled,JSON.stringify(st.scheduleDays),st.scheduleOpenHour,st.scheduleOpenMin,st.scheduleShowHour,st.scheduleShowMin,st.scheduleDuration])}
 function useOD(st){const prev=useRef(st.currentSlot);useEffect(()=>{if(st.currentSlot!==prev.current){prev.current=st.currentSlot;const nxt=nextF(st.slots,st.totalSlots,st.currentSlot);if(nxt){const p=st.slots[String(nxt)];sndN("🎤 You're on deck!",`${p.name}, you're up next!`)}}},[st.currentSlot,st.slots,st.totalSlots])}
 
 // ═══════════════════════════════════════════════════════════════════
@@ -169,10 +166,10 @@ function useOD(st){const prev=useRef(st.currentSlot);useEffect(()=>{if(st.curren
 function DirPage({go}){
   const[venues,setV]=useState([]);const[ld,setLd]=useState(true);
   useEffect(()=>{(async()=>{const idx=await ldIdx();const all=[];for(const e of idx){const v=await ldV(e.slug);if(v)all.push({slug:e.slug,...v})}setV(all);setLd(false)})()},[]);
-  const live=venues.filter(v=>v.signupOpen),rest=venues.filter(v=>!v.signupOpen);
+  const live=venues.filter(v=>v.signupOpen&&!v.archived),rest=venues.filter(v=>!v.signupOpen&&!v.archived);
   return(<div style={PAGE}><style>{CSS}</style>
     <div style={{...CARD,marginTop:40,textAlign:"center"}} className="drift">
-      <div style={{position:"absolute",top:-14,left:20,transform:"rotate(-3deg)",...TAG("var(--coral)","var(--cream)"),fontSize:10,padding:"4px 10px"}}>EST. TONIGHT</div>
+      <div style={{position:"absolute",top:-14,left:20,transform:"rotate(-3deg)",...TAG("var(--coral)","var(--cream)"),fontSize:10,padding:"4px 10px"}}>EST. 2026</div>
       <h1 style={{...TITLE,fontSize:"clamp(32px,7vw,48px)",marginTop:8}}>Open Mic<br/>Tonight</h1>
       <p style={{...BODY,marginTop:8,maxWidth:300,marginInline:"auto"}}>Every venue gets a link. Performers sign up on their phone. Host runs the show.</p>
       <button onClick={()=>go("create")} style={{...BTN,marginTop:20,width:"100%",fontSize:15}}
@@ -204,7 +201,7 @@ function CreatePage({go}){
   const[limMode,setLimMode]=useState("time");const[spp,setSpp]=useState(2);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   useEffect(()=>{if(!cust)setSl(slug(name))},[name,cust]);
-  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts};await svV(sl,v);const idx=await ldIdx();go(`${sl}/host`)};
+  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts};await svV(sl,v);const idx=await ldIdx();idx.push({slug:sl,name:name.trim(),created:Date.now()});await svIdx(idx);go(`${sl}/host`)};
   return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{maxWidth:460,width:"100%",marginTop:30}}>
       <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
@@ -266,18 +263,37 @@ function VenuePage({slug:SL,go}){
   const enNotif=async()=>{const ok=await reqN();setNP(ok?"granted":"denied");flash(ok?"Notifications on!":"Blocked")};
   if(!ld)return<div style={PAGE}><style>{CSS}</style><p style={BODY}>loading…</p></div>;
 
-  if(vw==="landing"){return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
+  if(vw==="landing"){
+    const[shH,shM]=showTime(st);
+    const nextShow=st.scheduleEnabled?nextOcc(schD,shH,shM):null;
+    return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{...CARD,marginTop:40,textAlign:"left"}} className="drift">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
         <div><p style={SUB}>OPEN MIC</p><h1 style={{...TITLE,fontSize:32,marginTop:4}}>{st.eventName}</h1></div>
-        {st.signupOpen?<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>:<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>CLOSED</span>}
+        {st.archived?<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>:st.signupOpen?<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>:<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>CLOSED</span>}
       </div>
-      {st.geofenceEnabled&&<p style={{...BODY,fontSize:12,marginTop:8}}>📍 Must be at venue</p>}
-      {st.scheduleEnabled&&<p style={{...BODY,fontSize:12,marginTop:4}}>🕐 {schD.map(d=>DAYS[d]).join(", ")} at {fT(st.scheduleOpenHour,st.scheduleOpenMin)}</p>}
-      <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:24}}>
-        <button style={{...BTN,width:"100%"}} onClick={()=>{setVw("signup");setStep("form");geo.check()}}>SIGN UP TO PERFORM →</button>
-        <button style={{...BTN2,width:"100%"}} onClick={()=>setVw("audience")}>VIEW LINEUP</button>
-      </div>
+
+      {st.archived&&nextShow?<>
+        <div style={{marginTop:18,padding:"14px 16px",background:"#fff8e8",border:"2px dashed var(--coral)",borderRadius:2}}>
+          <p style={{...SUB,color:"var(--coral)",margin:"0 0 4px"}}>COMING UP</p>
+          <p style={{fontFamily:"'Fraunces',serif",fontSize:18,fontWeight:700,color:"var(--ink)",lineHeight:1.3}}>{fFull(nextShow,shH,shM)}</p>
+          <p style={{...BODY,fontSize:12,marginTop:6}}>Signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · Show {fT(shH,shM)} · {st.limitMode==="time"?`${st.timePerSlot} min`:`${st.songsPerSlot} song${st.songsPerSlot!==1?"s":""}`}/act</p>
+          <p style={{...BODY,fontSize:11,marginTop:4,color:"var(--ink-light)"}}>Every {schD.map(d=>DAYS[d]).join(", ")}</p>
+        </div>
+        <p style={{...BODY,fontSize:12,marginTop:12,textAlign:"center"}}>Signups open when the show starts. Check back then!</p>
+      </>:st.archived?<>
+        <div style={{marginTop:18,padding:"14px 16px",background:"var(--paper-warm)",border:"2px dashed var(--ink-faded)",borderRadius:2}}>
+          <p style={{...BODY,margin:0}}>This open mic has ended. Check back later or find another venue.</p>
+        </div>
+      </>:<>
+        {st.geofenceEnabled&&<p style={{...BODY,fontSize:12,marginTop:8}}>📍 Must be at venue</p>}
+        {st.scheduleEnabled&&<p style={{...BODY,fontSize:12,marginTop:4}}>🕐 {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(shH,shM)}</p>}
+        <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:24}}>
+          <button style={{...BTN,width:"100%"}} onClick={()=>{setVw("signup");setStep("form");geo.check()}}>SIGN UP TO PERFORM →</button>
+          <button style={{...BTN2,width:"100%"}} onClick={()=>setVw("audience")}>VIEW LINEUP</button>
+        </div>
+      </>}
+
       <div style={{display:"flex",justifyContent:"space-between",marginTop:16}}>
         <button style={BTN_GHOST} onClick={()=>go("")}>← all venues</button>
         <button style={{...BTN_GHOST,color:"var(--ink-faded)",fontSize:11}} onClick={()=>go(`${SL}/host`)}>host panel →</button>
@@ -327,7 +343,7 @@ function VenuePage({slug:SL,go}){
             {nP!=="granted"&&nP!=="unsupported"&&<button style={{...BTN2,width:"100%",marginTop:12,fontSize:13}} onClick={enNotif}>🔔 NOTIFY WHEN ON DECK</button>}
             {nP==="granted"&&<p style={{...BODY,fontSize:12,color:"var(--teal)",marginTop:10}}>🔔 Notifications on</p>}
           </div>})()
-      ):!st.signupOpen?<div style={{marginTop:16}}><p style={{...BODY,color:"var(--coral)"}}>Sign-ups are closed.</p>{st.scheduleEnabled&&<p style={{...BODY,marginTop:4}}>Next: {schD.map(d=>DAYS[d]).join(", ")} at {fT(st.scheduleOpenHour,st.scheduleOpenMin)}</p>}</div>
+      ):!st.signupOpen?<div style={{marginTop:16}}><p style={{...BODY,color:"var(--coral)"}}>Sign-ups are closed.</p>{st.scheduleEnabled&&<p style={{...BODY,marginTop:4}}>Next: {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(...showTime(st))}</p>}</div>
       :gC?<div style={{textAlign:"center",margin:"30px 0"}}><p style={BODY}>📡 Checking location…</p></div>
       :gB?<div style={{textAlign:"center",margin:"20px 0"}}>{geo.status==="too_far"&&<><p style={{fontWeight:700,color:"var(--coral)"}}>📍 Not at venue</p><p style={BODY}>~{geo.dist}m away (need ≤{st.venueRadius}m)</p></>}{geo.status==="error"&&<p style={{color:"var(--coral)",fontWeight:600}}>Location failed</p>}<button style={{...BTN_SM,marginTop:12}} onClick={geo.check}>retry</button></div>
       :dP?<div style={{marginTop:16}}><p style={{fontWeight:700,fontSize:15}}>🎤 Already performed!</p><p style={BODY}>Enjoy the rest of the show.</p></div>
@@ -419,8 +435,12 @@ function HostPage({slug:SL,go}){
       <div style={{display:"flex",borderRadius:2,overflow:"hidden",border:"2px solid var(--ink)",marginBottom:16}}>
         {[["show","SHOW"],["settings","SETTINGS"]].map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{flex:1,padding:"10px 0",border:"none",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Overpass Mono',monospace",letterSpacing:1,background:tab===k?"var(--ink)":"var(--cream)",color:tab===k?"var(--cream)":"var(--ink-mid)"}}>{l}</button>)}
       </div>
+      {st.archived&&<div style={{background:"#fbeae6",border:"2px dashed var(--coral)",borderRadius:2,padding:"12px 14px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <div style={{flex:1,minWidth:0}}><p style={{...SUB,color:"var(--coral)",margin:0}}>ENDED</p><p style={{...BODY,fontSize:12,marginTop:2}}>Hidden from the directory. Restore to make it public again.</p></div>
+        <button style={{...BTN_SM,background:"var(--teal)",color:"var(--cream)",borderColor:"var(--teal)"}} onClick={()=>{persist({...st,archived:false});flash("Restored!")}}>↻ RESTORE</button>
+      </div>}
       {tab==="show"&&<>
-        {st.scheduleEnabled&&<div style={{background:"#e8f6f0",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:12,margin:0,color:"var(--teal)",fontWeight:600}}>⏰ {schD.map(d=>DAYS[d]).join(", ")} {fT(st.scheduleOpenHour,st.scheduleOpenMin)} – {fT(...addM(st.scheduleOpenHour,st.scheduleOpenMin,st.scheduleDuration))}{inSch(st)===true?" · OPEN":" · Closed"}{st.manualOverride?" · MANUAL":""}</p></div>}
+        {st.scheduleEnabled&&<div style={{background:"#e8f6f0",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:12,margin:0,color:"var(--teal)",fontWeight:600}}>⏰ {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} → show {fT(...showTime(st))}{inSch(st)===true?" · OPEN":" · Closed"}{st.manualOverride?" · MANUAL":""}</p></div>}
         {st.geofenceEnabled&&st.venueLat&&<div style={{background:"#fff8e8",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--ink-faded)"}}><p style={{...BODY,fontSize:12,margin:0}}>📍 Geofence {st.venueRadius}m{st.venueName?` · ${st.venueName.split(",")[0]}`:""}</p></div>}
         <div style={{display:"flex",gap:8,marginBottom:10}}>
           <button style={{...BTN,flex:1,background:st.signupOpen?"var(--coral)":"var(--teal)",borderColor:st.signupOpen?"var(--coral)":"var(--teal)",color:"var(--cream)"}} onClick={togSignup}>{st.signupOpen?"🔒 CLOSE":"🔓 OPEN"} SIGNUP</button>
@@ -439,7 +459,14 @@ function HostPage({slug:SL,go}){
           <SlotGrid slots={st.slots} totalSlots={st.totalSlots} currentSlot={st.currentSlot} onDeckSlot={odS} onMove={(f,t)=>persist({...st,slots:mvSlot(st.slots,st.totalSlots,f,t)})} onRemove={rmSlot} onClearLink={n=>{const p=st.slots[String(n)];if(p){const{link,...r}=p;persist({...st,slots:{...st.slots,[String(n)]:r}})}}}/>
         </div>
         {st.waitlist.length>0&&<div style={{...SECT,marginTop:8}}><p style={{...SUB,margin:"0 0 6px"}}>WAITLIST ({st.waitlist.length})</p>{st.waitlist.map((p,i)=><div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 8px"}}><span style={{...BODY,fontSize:13}}>{i+1}. {p.name}</span><button onClick={()=>persist({...st,waitlist:st.waitlist.filter(w=>w.id!==p.id)})} style={{...BTN_GHOST,color:"var(--coral)",fontSize:14}}>×</button></div>)}</div>}
-        <button style={{...LINK,color:"var(--coral)",marginTop:18}} onClick={()=>{if(confirm("Reset everything?"))resetShow()}}>reset show</button>
+        <div style={{marginTop:22,paddingTop:16,borderTop:"1px dashed var(--ink-faded)"}}>
+          <p style={{...SUB,color:"var(--coral)",margin:"0 0 10px"}}>DANGER ZONE</p>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <button style={{...BTN_SM,background:"var(--cream)",color:"var(--coral)",borderColor:"var(--coral)"}} onClick={()=>{if(confirm("Clear tonight's lineup? The venue stays active."))resetShow()}}>↺ RESET SHOW</button>
+            <button style={{...BTN_SM,background:"var(--coral)",color:"var(--cream)",borderColor:"var(--coral)",boxShadow:"2px 2px 0 var(--ink)"}} onClick={()=>{if(confirm("End this open mic? It'll be removed from the directory. You can restore it anytime from this page."))persist({...st,archived:true,signupOpen:false})}}>✕ END OPEN MIC</button>
+          </div>
+          <p style={{...BODY,fontSize:11,marginTop:8}}>Reset clears tonight's performers. End hides the venue from the public directory (link still works).</p>
+        </div>
       </>}
       {tab==="settings"&&<>
         <div style={SECT}>
@@ -467,9 +494,10 @@ function HostPage({slug:SL,go}){
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🕐 AUTO SCHEDULE</p><Toggle on={st.scheduleEnabled} onToggle={()=>persist({...st,scheduleEnabled:!st.scheduleEnabled})}/></div>
           {st.scheduleEnabled&&<div style={{marginTop:12}}>
             <label style={SUB}>DAYS</label><div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:6,marginBottom:12}}>{DAYS.map((d,i)=><button key={i} onClick={()=>togDay(i)} style={{padding:"6px 10px",borderRadius:2,border:"2px solid var(--ink)",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Overpass Mono',monospace",background:schD.includes(i)?"var(--ink)":"var(--cream)",color:schD.includes(i)?"var(--cream)":"var(--ink-mid)"}}>{d}</button>)}</div>
-            <label style={SUB}>OPENS AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:12}}><NumInput value={st.scheduleOpenHour} min={0} max={23} onChange={v=>persist({...st,scheduleOpenHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleOpenMin} min={0} max={59} onChange={v=>persist({...st,scheduleOpenMin:v})}/></div>
-            <label style={SUB}>WINDOW (min)</label><NumInput style={{marginTop:6}} value={st.scheduleDuration} min={5} max={180} onChange={v=>persist({...st,scheduleDuration:v})}/>
-            <div style={{background:"#e8f6f0",borderRadius:2,padding:"10px 12px",marginTop:12,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:13,margin:0,color:"var(--teal)"}}>Every <strong>{schD.map(d=>DAYS[d]).join(", ")||"—"}</strong> at <strong>{fT(st.scheduleOpenHour,st.scheduleOpenMin)}</strong> → closes <strong>{fT(...addM(st.scheduleOpenHour,st.scheduleOpenMin,st.scheduleDuration))}</strong></p></div>
+            <label style={SUB}>SIGNUPS OPEN AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:12}}><NumInput value={st.scheduleOpenHour} min={0} max={23} onChange={v=>persist({...st,scheduleOpenHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleOpenMin} min={0} max={59} onChange={v=>persist({...st,scheduleOpenMin:v})}/></div>
+            <label style={SUB}>SHOW STARTS AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:4}}><NumInput value={st.scheduleShowHour!=null?st.scheduleShowHour:showTime(st)[0]} min={0} max={23} onChange={v=>persist({...st,scheduleShowHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleShowMin!=null?st.scheduleShowMin:showTime(st)[1]} min={0} max={59} onChange={v=>persist({...st,scheduleShowMin:v})}/></div>
+            <p style={{...BODY,fontSize:11,marginBottom:12,color:"var(--ink-light)"}}>Signups stay open until you close them manually. Show time is shown to performers.</p>
+            <div style={{background:"#e8f6f0",borderRadius:2,padding:"10px 12px",marginTop:4,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:13,margin:0,color:"var(--teal)"}}>Every <strong>{schD.map(d=>DAYS[d]).join(", ")||"—"}</strong>: signups open <strong>{fT(st.scheduleOpenHour,st.scheduleOpenMin)}</strong>, show starts <strong>{fT(...showTime(st))}</strong></p></div>
           </div>}
         </div>
       </>}
