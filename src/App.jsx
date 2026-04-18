@@ -60,6 +60,7 @@ function fHrs(h){if(h<=0)return"0h";const wh=Math.floor(h),m=Math.round((h-wh)*6
 // For cleanup: returns effective "last host activity" timestamp. Grandfather
 // existing venues by pretending they were just seen if they have no stamp.
 function lastSeen(v,graceFrom){if(v.lastHostSeen)return v.lastHostSeen;if(v.createdAt)return v.createdAt;return graceFrom}
+function isUpcoming(v){return v.scheduleEnabled&&v.scheduleDays?.length>0&&!!nextOcc(v.scheduleDays,...showTime(v))}
 function addr(s){return(s.venueAddress||s.venueName||"").trim()}
 function shortAddr(a,n){if(!a)return"";return a.length>n?a.slice(0,n-1)+"…":a}
 function mvSlot(si,tot,f,t){if(f===t)return si;const s={...si},p=s[String(f)];if(!p)return si;delete s[String(f)];if(!s[String(t)]){s[String(t)]=p;return s}let ed=null,eu=null;for(let i=t+1;i<=tot;i++){if(!s[String(i)]){ed=i;break}}for(let i=t-1;i>=1;i--){if(!s[String(i)]){eu=i;break}}const dd=t>f,ud=dd?(ed!==null):(eu===null);if(ud&&ed!==null){for(let i=ed;i>t;i--)s[String(i)]=s[String(i-1)]||null}else if(!ud&&eu!==null){for(let i=eu;i<t;i++)s[String(i)]=s[String(i+1)]||null}else if(ed!==null){for(let i=ed;i>t;i--)s[String(i)]=s[String(i-1)]||null}else if(eu!==null){for(let i=eu;i<t;i++)s[String(i)]=s[String(i+1)]||null}s[String(t)]=p;for(let i=1;i<=tot;i++)if(!s[String(i)])delete s[String(i)];return s}
@@ -207,7 +208,7 @@ function DirPage({go}){
   const searching=ql.length>0;
   const matches=searching?venues.filter(v=>v.eventName?.toLowerCase().includes(ql)||v.slug.toLowerCase().includes(ql)):[];
   const myList=mine.map(s=>venues.find(v=>v.slug===s)).filter(Boolean);
-  const live=venues.filter(v=>v.signupOpen&&!v.archived),rest=venues.filter(v=>!v.signupOpen&&!v.archived);
+  const live=venues.filter(v=>v.signupOpen&&!v.archived),rest=venues.filter(v=>!v.signupOpen&&!v.archived),upcoming=venues.filter(v=>v.archived&&isUpcoming(v));
   return(<div style={PAGE}><style>{CSS}</style>
     <div style={{...CARD,marginTop:40,textAlign:"center"}} className="drift">
       <div style={{position:"absolute",top:-14,left:20,transform:"rotate(-3deg)",...TAG("var(--coral)","var(--cream)"),fontSize:10,padding:"4px 10px"}}>EST. TONIGHT</div>
@@ -219,38 +220,45 @@ function DirPage({go}){
     </div>
 
     <div style={{maxWidth:460,width:"100%",marginTop:20}}>
-      <input style={{...INP,fontSize:14}} placeholder="🔍 search venues (includes ended shows)" value={q} onChange={e=>setQ(e.target.value)}/>
+      <input style={{...INP,fontSize:14}} placeholder="🔍 search all venues" value={q} onChange={e=>setQ(e.target.value)}/>
     </div>
 
     {myList.length>0&&!searching&&<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-1">
       <span style={SUB}>YOUR VENUES</span>
-      {myList.map(v=><div key={v.slug} onClick={()=>go(`${v.slug}/host`)} style={{...SECT,cursor:"pointer",marginTop:8,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+      {myList.map(v=>{const up=v.archived&&isUpcoming(v);return<div key={v.slug} onClick={()=>go(`${v.slug}/host`)} style={{...SECT,cursor:"pointer",marginTop:8,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
         <div style={{minWidth:0,flex:1}}>
           <p style={{fontWeight:700,fontSize:15,margin:0}}>{v.eventName}</p>
-          <p style={{...BODY,fontSize:12,marginTop:2}}>{v.slug}{v.archived?" · ended":v.signupOpen?" · live":""}</p>
+          <p style={{...BODY,fontSize:12,marginTop:2}}>{v.slug}{v.archived?(up?" · upcoming":" · ended"):v.signupOpen?" · live":""}</p>
         </div>
-        {v.archived&&<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>}
+        {v.archived&&up&&<span style={TAG("#fff8e8","var(--coral)")}>UPCOMING</span>}
+        {v.archived&&!up&&<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>}
         {v.signupOpen&&!v.archived&&<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>}
-      </div>)}
+      </div>})}
     </div>}
 
     {searching?<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-2">
       <span style={SUB}>{matches.length} result{matches.length!==1?"s":""}</span>
       {matches.length===0&&<p style={{...BODY,marginTop:12,textAlign:"center"}}>No venues match "{q}". Try fewer words.</p>}
-      {matches.map(v=><div key={v.slug} onClick={()=>go(v.archived?`${v.slug}/host`:v.slug)} style={{...SECT,cursor:"pointer",marginTop:8,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,opacity:v.archived?0.75:1}}>
+      {matches.map(v=>{const up=v.archived&&isUpcoming(v);const[shH,shM]=showTime(v);const nxt=up?nextOcc(v.scheduleDays,shH,shM):null;return<div key={v.slug} onClick={()=>go(v.archived&&!up?`${v.slug}/host`:v.slug)} style={{...SECT,cursor:"pointer",marginTop:8,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,opacity:v.archived&&!up?0.75:1}}>
         <div style={{minWidth:0,flex:1}}>
           <p style={{fontWeight:700,fontSize:15,margin:0}}>{v.eventName}</p>
-          <p style={{...BODY,fontSize:12,marginTop:2}}>{v.slug}{v.showDate?` · last ${fD(v.showDate)}`:""}</p>
+          <p style={{...BODY,fontSize:12,marginTop:2}}>{v.slug}{up&&nxt?` · next ${fD(nxt)}`:v.showDate?` · last ${fD(v.showDate)}`:""}</p>
         </div>
-        {v.archived?<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>:v.signupOpen?<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>:null}
-      </div>)}
-      {matches.some(v=>v.archived)&&<p style={{...BODY,fontSize:11,marginTop:10,color:"var(--ink-light)",textAlign:"center"}}>Ended venues link straight to the host panel (PIN required).</p>}
+        {v.archived&&up?<span style={TAG("#fff8e8","var(--coral)")}>UPCOMING</span>:v.archived?<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>:v.signupOpen?<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>:null}
+      </div>})}
+      {matches.some(v=>v.archived&&!isUpcoming(v))&&<p style={{...BODY,fontSize:11,marginTop:10,color:"var(--ink-light)",textAlign:"center"}}>Ended venues link straight to the host panel (PIN required).</p>}
     </div>:<>
       {live.length>0&&<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-1">
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><div style={{width:8,height:8,borderRadius:"50%",background:"var(--teal)",animation:"blink 1.5s infinite"}}/><span style={{...SUB,color:"var(--teal)",margin:0}}>HAPPENING NOW</span></div>
         {live.map(v=><div key={v.slug} onClick={()=>go(v.slug)} style={{...CARD_ALT,cursor:"pointer",marginBottom:10,padding:"16px 18px",borderColor:"var(--teal)"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div><p style={{...TITLE,fontSize:18,margin:0}}>{v.eventName}</p><p style={{...BODY,fontSize:12,marginTop:3}}>{filled(v.slots||{}).length}/{v.totalSlots} slots{addr(v)?` · ${shortAddr(addr(v),50)}`:""}</p></div><span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span></div>
         </div>)}
+      </div>}
+      {upcoming.length>0&&<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-1">
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><span style={{...SUB,color:"var(--coral)",margin:0}}>📅 COMING UP</span></div>
+        {upcoming.map(v=>{const[shH,shM]=showTime(v);const nxt=nextOcc(v.scheduleDays,shH,shM);return<div key={v.slug} onClick={()=>go(v.slug)} style={{...CARD_ALT,cursor:"pointer",marginBottom:10,padding:"16px 18px",borderColor:"var(--coral)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div><p style={{...TITLE,fontSize:18,margin:0}}>{v.eventName}</p>{nxt&&<p style={{...BODY,fontSize:12,marginTop:3}}>{fFull(nxt,shH,shM)}{addr(v)?` · ${shortAddr(addr(v),40)}`:""}</p>}</div><span style={TAG("#fff8e8","var(--coral)")}>UPCOMING</span></div>
+        </div>})}
       </div>}
       {rest.length>0&&<div style={{maxWidth:460,width:"100%",marginTop:20}} className="drift-2">
         <span style={SUB}>ALL VENUES</span>
