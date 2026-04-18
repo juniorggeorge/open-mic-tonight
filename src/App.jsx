@@ -35,7 +35,7 @@ function removeMyVenue(slug) { try { localStorage.setItem(MY_KEY, JSON.stringify
 // ─── Utils ────────────────────────────────────────────────────────
 const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MO=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",archived:false,createdAt:0,lastHostSeen:0,scheduleEndEnabled:false,scheduleEndDate:null};
+const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",archived:false,createdAt:0,lastHostSeen:0,scheduleCloseEnabled:false,scheduleCloseHour:22,scheduleCloseMin:0};
 
 function gid(){return Math.random().toString(36).slice(2,10)+Date.now().toString(36)}
 function slug(s){return s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,48)}
@@ -53,10 +53,6 @@ function findDev(sl,d){for(const[k,v]of Object.entries(sl))if(v&&v.deviceId===d)
 function nextF(sl,tot,cur){for(let i=cur+1;i<=tot;i++)if(sl[String(i)])return i;return null}
 function lowOpen(sl,tot){for(let i=1;i<=tot;i++)if(!sl[String(i)])return i;return null}
 function eUrl(s){if(!s)return"";const t=s.trim();return/^https?:\/\//i.test(t)?t:"https://"+t}
-function toDateVal(ts){if(!ts)return"";const d=new Date(ts);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`}
-function toTimeVal(ts){if(!ts)return"";const d=new Date(ts);return`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`}
-function fromDateTimeVals(dateStr,timeStr){if(!dateStr)return null;const[y,mo,dy]=dateStr.split("-").map(Number);const[h,m]=timeStr?timeStr.split(":").map(Number):[23,59];return new Date(y,mo-1,dy,h,m).getTime()}
-function fEndDate(ts){if(!ts)return"";const d=new Date(ts);return`${MO[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} at ${fT(d.getHours(),d.getMinutes())}`}
 // For cleanup: returns effective "last host activity" timestamp. Grandfather
 // existing venues by pretending they were just seen if they have no stamp.
 function lastSeen(v,graceFrom){if(v.lastHostSeen)return v.lastHostSeen;if(v.createdAt)return v.createdAt;return graceFrom}
@@ -181,10 +177,15 @@ function SlotGrid({slots,totalSlots,currentSlot,onDeckSlot,onMove,onRemove,onCle
 // ─── Hooks ────────────────────────────────────────────────────────
 function useGeo(st){const[status,setS]=useState("idle");const[dist,setD]=useState(null);const check=useCallback(()=>{if(!st.geofenceEnabled||!st.venueLat){setS("ok");return}if(!navigator.geolocation){setS("unavailable");return}setS("checking");navigator.geolocation.getCurrentPosition(p=>{const d=hav(p.coords.latitude,p.coords.longitude,st.venueLat,st.venueLng);setD(Math.round(d));setS(d<=st.venueRadius?"ok":"too_far")},()=>setS("error"),{enableHighAccuracy:true,timeout:10000})},[st.geofenceEnabled,st.venueLat,st.venueLng,st.venueRadius]);return{status,dist,check}}
 function sameDay(a,b){const d1=new Date(a),d2=new Date(b);return d1.getFullYear()===d2.getFullYear()&&d1.getMonth()===d2.getMonth()&&d1.getDate()===d2.getDate()}
-function useSch(st,persist){const ref=useRef(st);ref.current=st;useEffect(()=>{if(!st.scheduleEnabled)return;const tick=()=>{const s=ref.current;if(s.archived)return;
-// Auto-archive if past scheduled end date and signups are closed
-if(s.scheduleEndEnabled&&s.scheduleEndDate&&Date.now()>=s.scheduleEndDate&&!s.signupOpen){persist({...s,archived:true,signupOpen:false});return}
-const so=inSch(s);const isNewWindow=so===true&&(!s.showDate||!sameDay(s.showDate,Date.now()));if(s.manualOverride){if(isNewWindow)persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false});return}if(isNewWindow)persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[]})};tick();const id=setInterval(tick,15000);return()=>clearInterval(id)},[st.scheduleEnabled,JSON.stringify(st.scheduleDays),st.scheduleOpenHour,st.scheduleOpenMin,st.scheduleShowHour,st.scheduleShowMin,st.scheduleDuration,st.scheduleEndEnabled,st.scheduleEndDate])}
+function useSch(st,persist){const ref=useRef(st);ref.current=st;useEffect(()=>{if(!st.scheduleEnabled)return;const tick=()=>{const s=ref.current;
+const so=inSch(s);const isNewWindow=so===true&&(!s.showDate||!sameDay(s.showDate,Date.now()));
+// New show window: un-archive, open signups, reset lineup (even if currently archived)
+if(isNewWindow&&!s.manualOverride){persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false,archived:false});return}
+if(isNewWindow&&s.manualOverride){persist({...s,signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false,archived:false});return}
+if(s.archived)return;
+// Auto-close: on show days, past close time → close signups & archive
+if(s.scheduleCloseEnabled){const n=new Date(),dy=s.scheduleDays||[4];if(dy.includes(n.getDay())){const m=n.getHours()*60+n.getMinutes(),cl=s.scheduleCloseHour*60+s.scheduleCloseMin;if(m>=cl&&s.signupOpen){persist({...s,signupOpen:false,archived:true,manualOverride:true});return}if(m>=cl&&!s.signupOpen&&s.showDate&&sameDay(s.showDate,Date.now())){persist({...s,archived:true,manualOverride:true});return}}}
+if(s.manualOverride)return};tick();const id=setInterval(tick,15000);return()=>clearInterval(id)},[st.scheduleEnabled,JSON.stringify(st.scheduleDays),st.scheduleOpenHour,st.scheduleOpenMin,st.scheduleShowHour,st.scheduleShowMin,st.scheduleDuration,st.scheduleCloseEnabled,st.scheduleCloseHour,st.scheduleCloseMin])}
 
 // ═══════════════════════════════════════════════════════════════════
 //  DIRECTORY
@@ -268,7 +269,7 @@ function CreatePage({go}){
   const[limMode,setLimMode]=useState("time");const[spp,setSpp]=useState(2);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   useEffect(()=>{if(!cust)setSl(slug(name))},[name,cust]);
-  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const now=Date.now();const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts,createdAt:now,lastHostSeen:now};await svV(sl,v);const idx=await ldIdx();go(`${sl}/host`)};
+  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const now=Date.now();const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts,createdAt:now,lastHostSeen:now};await svV(sl,v);const idx=await ldIdx();await svIdx(idx);addMyVenue(sl);go(`${sl}/host`)};
   return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{maxWidth:460,width:"100%",marginTop:30}}>
       <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
@@ -372,7 +373,7 @@ function VenuePage({slug:SL,go}){
       </>:<>
         {addr(st)&&<p style={{...BODY,fontSize:12,marginTop:8,lineHeight:1.4}}>📌 {addr(st)}</p>}
         {st.geofenceEnabled&&<p style={{...BODY,fontSize:12,marginTop:4,color:"var(--coral)"}}>📍 Must be at venue to sign up</p>}
-        {st.scheduleEnabled&&<p style={{...BODY,fontSize:12,marginTop:4}}>🕐 {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(shH,shM)}</p>}
+        {st.scheduleEnabled&&<p style={{...BODY,fontSize:12,marginTop:4}}>🕐 {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(shH,shM)}{st.scheduleCloseEnabled?` · closes ${fT(st.scheduleCloseHour,st.scheduleCloseMin)}`:""}</p>}
         <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:24}}>
           <button style={{...BTN,width:"100%"}} onClick={()=>{setVw("signup");setStep("form");geo.check()}}>SIGN UP TO PERFORM →</button>
           <button style={{...BTN2,width:"100%"}} onClick={()=>setVw("audience")}>VIEW LINEUP</button>
@@ -427,7 +428,7 @@ function VenuePage({slug:SL,go}){
               {!(me&&st.currentSlot>0&&me.slotNum===st.currentSlot)&&<button style={{...BTN_SM,background:"var(--cream)",color:"var(--coral)",borderColor:"var(--coral)"}} onClick={dropOut}>drop out</button>}
             </div>
           </div>})()
-      ):!st.signupOpen?<div style={{marginTop:16}}><p style={{...BODY,color:"var(--coral)"}}>Sign-ups are closed.</p>{st.scheduleEnabled&&<p style={{...BODY,marginTop:4}}>Next: {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(...showTime(st))}</p>}</div>
+      ):!st.signupOpen?<div style={{marginTop:16}}><p style={{...BODY,color:"var(--coral)"}}>Sign-ups are closed.</p>{st.scheduleEnabled&&<p style={{...BODY,marginTop:4}}>Next: {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} · show {fT(...showTime(st))}{st.scheduleCloseEnabled?` · closes ${fT(st.scheduleCloseHour,st.scheduleCloseMin)}`:""}</p>}</div>
       :gC?<div style={{textAlign:"center",margin:"30px 0"}}><p style={BODY}>📡 Checking location…</p></div>
       :gB?<div style={{textAlign:"center",margin:"20px 0"}}>{geo.status==="too_far"&&<><p style={{fontWeight:700,color:"var(--coral)"}}>📍 Not at venue</p><p style={BODY}>~{geo.dist}m away (need ≤{st.venueRadius}m)</p></>}{geo.status==="error"&&<p style={{color:"var(--coral)",fontWeight:600}}>Location failed</p>}<button style={{...BTN_SM,marginTop:12}} onClick={geo.check}>retry</button></div>
       :dP?<div style={{marginTop:16}}><p style={{fontWeight:700,fontSize:15}}>🎤 Already performed!</p><p style={BODY}>Enjoy the rest of the show.</p></div>
@@ -552,7 +553,7 @@ function HostPage({slug:SL,go}){
         <button style={{...BTN_SM,width:"100%"}} onClick={copyHostLink}>📋 COPY HOST URL</button>
       </div>}
       {tab==="show"&&<>
-        {st.scheduleEnabled&&<div style={{background:"#e8f6f0",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:12,margin:0,color:"var(--teal)",fontWeight:600}}>⏰ {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} → show {fT(...showTime(st))}{inSch(st)===true?" · OPEN":" · Closed"}{st.manualOverride?" · MANUAL":""}{st.scheduleEndEnabled&&st.scheduleEndDate?` · ends ${fEndDate(st.scheduleEndDate)}`:""}</p></div>}
+        {st.scheduleEnabled&&<div style={{background:"#e8f6f0",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:12,margin:0,color:"var(--teal)",fontWeight:600}}>⏰ {schD.map(d=>DAYS[d]).join(", ")} · signups {fT(st.scheduleOpenHour,st.scheduleOpenMin)} → show {fT(...showTime(st))}{st.scheduleCloseEnabled?` → closes ${fT(st.scheduleCloseHour,st.scheduleCloseMin)}`:""}{inSch(st)===true?" · OPEN":" · Closed"}{st.manualOverride?" · MANUAL":""}</p></div>}
         {st.geofenceEnabled&&st.venueLat&&<div style={{background:"#fff8e8",borderRadius:2,padding:"8px 12px",marginBottom:10,border:"1px solid var(--ink-faded)"}}><p style={{...BODY,fontSize:12,margin:0}}>📍 Geofence {st.venueRadius}m{addr(st)?` · ${shortAddr(addr(st),60)}`:""}</p></div>}
         <div style={{display:"flex",gap:8,marginBottom:10}}>
           <button style={{...BTN,flex:1,background:st.signupOpen?"var(--coral)":"var(--teal)",borderColor:st.signupOpen?"var(--coral)":"var(--teal)",color:"var(--cream)"}} onClick={togSignup}>{st.signupOpen?"🔒 CLOSE":"🔓 OPEN"} SIGNUP</button>
@@ -630,22 +631,16 @@ function HostPage({slug:SL,go}){
             <label style={SUB}>DAYS</label><div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:6,marginBottom:12}}>{DAYS.map((d,i)=><button key={i} onClick={()=>togDay(i)} style={{padding:"6px 10px",borderRadius:2,border:"2px solid var(--ink)",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Overpass Mono',monospace",background:schD.includes(i)?"var(--ink)":"var(--cream)",color:schD.includes(i)?"var(--cream)":"var(--ink-mid)"}}>{d}</button>)}</div>
             <label style={SUB}>SIGNUPS OPEN AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:12}}><NumInput value={st.scheduleOpenHour} min={0} max={23} onChange={v=>persist({...st,scheduleOpenHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleOpenMin} min={0} max={59} onChange={v=>persist({...st,scheduleOpenMin:v})}/></div>
             <label style={SUB}>SHOW STARTS AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:4}}><NumInput value={st.scheduleShowHour!=null?st.scheduleShowHour:showTime(st)[0]} min={0} max={23} onChange={v=>persist({...st,scheduleShowHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleShowMin!=null?st.scheduleShowMin:showTime(st)[1]} min={0} max={59} onChange={v=>persist({...st,scheduleShowMin:v})}/></div>
-            <p style={{...BODY,fontSize:11,marginBottom:12,color:"var(--ink-light)"}}>Signups stay open until you close them manually. Show time is shown to performers.</p>
-            <div style={{background:"#e8f6f0",borderRadius:2,padding:"10px 12px",marginTop:4,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:13,margin:0,color:"var(--teal)"}}>Every <strong>{schD.map(d=>DAYS[d]).join(", ")||"—"}</strong>: signups open <strong>{fT(st.scheduleOpenHour,st.scheduleOpenMin)}</strong>, show starts <strong>{fT(...showTime(st))}</strong>{st.scheduleEndEnabled&&st.scheduleEndDate?<><br/>Ends <strong>{fEndDate(st.scheduleEndDate)}</strong></>:null}</p></div>
-            <div style={{marginTop:14,paddingTop:14,borderTop:"1px dashed var(--ink-faded)"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>📅 AUTO END DATE</p><Toggle on={st.scheduleEndEnabled} onToggle={()=>persist({...st,scheduleEndEnabled:!st.scheduleEndEnabled})}/></div>
-              <p style={{...BODY,fontSize:11,marginTop:6}}>Automatically archive this venue after a specific date &amp; time (once signups close).</p>
-              {st.scheduleEndEnabled&&<div style={{marginTop:10}}>
-                <label style={SUB}>END DATE</label>
-                <input type="date" style={{...INP,marginTop:6,fontFamily:"'Overpass Mono',monospace",fontSize:14}} value={toDateVal(st.scheduleEndDate)} onChange={e=>{const ts=fromDateTimeVals(e.target.value,toTimeVal(st.scheduleEndDate)||"23:59");persist({...st,scheduleEndDate:ts})}}/>
-                <label style={{...SUB,marginTop:10,display:"block"}}>END TIME</label>
-                <input type="time" style={{...INP,marginTop:6,fontFamily:"'Overpass Mono',monospace",fontSize:14}} value={toTimeVal(st.scheduleEndDate)||"23:59"} onChange={e=>{const ts=fromDateTimeVals(toDateVal(st.scheduleEndDate)||toDateVal(Date.now()),e.target.value);persist({...st,scheduleEndDate:ts})}}/>
-                {st.scheduleEndDate&&<div style={{background:Date.now()>=st.scheduleEndDate?"#fbeae6":"#fff8e8",border:`1px solid ${Date.now()>=st.scheduleEndDate?"var(--coral)":"var(--ink-faded)"}`,borderRadius:2,padding:"8px 12px",marginTop:10}}>
-                  <p style={{...BODY,fontSize:12,margin:0,color:Date.now()>=st.scheduleEndDate?"var(--coral)":"var(--ink)"}}>{Date.now()>=st.scheduleEndDate?"⚠ End date has passed — venue will archive once signups close.":`Will auto-archive after ${fEndDate(st.scheduleEndDate)} when signups are closed.`}</p>
-                </div>}
-                {st.scheduleEndDate&&<button style={{...BTN_GHOST,color:"var(--coral)",fontSize:11,marginTop:6,padding:0}} onClick={()=>persist({...st,scheduleEndDate:null,scheduleEndEnabled:false})}>clear end date</button>}
+            <p style={{...BODY,fontSize:11,marginBottom:12,color:"var(--ink-light)"}}>{st.scheduleCloseEnabled?"Signups auto-close at the end time below.":"Signups stay open until you close them manually."} Show time is shown to performers.</p>
+            <div style={{marginTop:4,paddingTop:12,borderTop:"1px dashed var(--ink-faded)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🔒 AUTO-CLOSE &amp; ARCHIVE</p><Toggle on={st.scheduleCloseEnabled} onToggle={()=>persist({...st,scheduleCloseEnabled:!st.scheduleCloseEnabled})}/></div>
+              <p style={{...BODY,fontSize:11,marginTop:6}}>Each {schD.map(d=>DAYS[d]).join(", ")||"show day"}, signups close and the venue archives at a set time. Resets fresh next show day.</p>
+              {st.scheduleCloseEnabled&&<div style={{marginTop:10}}>
+                <label style={SUB}>CLOSE AT</label>
+                <div style={{display:"flex",gap:8,alignItems:"center",marginTop:6}}><NumInput value={st.scheduleCloseHour} min={0} max={23} onChange={v=>persist({...st,scheduleCloseHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleCloseMin} min={0} max={59} onChange={v=>persist({...st,scheduleCloseMin:v})}/></div>
               </div>}
             </div>
+            <div style={{background:"#e8f6f0",borderRadius:2,padding:"10px 12px",marginTop:12,border:"1px solid var(--teal)"}}><p style={{...BODY,fontSize:13,margin:0,color:"var(--teal)"}}>Every <strong>{schD.map(d=>DAYS[d]).join(", ")||"—"}</strong>: signups open <strong>{fT(st.scheduleOpenHour,st.scheduleOpenMin)}</strong>, show starts <strong>{fT(...showTime(st))}</strong>{st.scheduleCloseEnabled?<>{", closes "}<strong>{fT(st.scheduleCloseHour,st.scheduleCloseMin)}</strong></>:null}</p></div>
           </div>}
         </div>
       </>}
