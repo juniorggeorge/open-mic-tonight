@@ -683,7 +683,7 @@ function ContactPage({go}){
         <p style={{...BODY,marginTop:10,marginBottom:20,maxWidth:340,marginInline:"auto"}}>We'd love to get your open mic set up on the platform. Reach out and we'll get you started.</p>
         <div style={{background:"var(--paper-warm)",border:"2px dashed var(--ink-mid)",borderRadius:2,padding:"16px 20px"}}>
           <p style={{...SUB,margin:"0 0 6px"}}>GET IN TOUCH</p>
-          <a href="mailto:jamesrh36@gmail.com" style={{fontFamily:"'Overpass Mono',monospace",fontSize:16,fontWeight:700,color:"var(--coral)",textDecoration:"none",wordBreak:"break-all"}}>temp@email.com</a>
+          <a href="mailto:jamesrh36@gmail.com" style={{fontFamily:"'Overpass Mono',monospace",fontSize:16,fontWeight:700,color:"var(--coral)",textDecoration:"none",wordBreak:"break-all"}}>jamesrh36@gmail.com</a>
         </div>
         <p style={{...BODY,fontSize:12,marginTop:16,color:"var(--ink-light)"}}>Include your venue name, location, and how often you host — we'll take it from there.</p>
       </div>
