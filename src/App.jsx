@@ -742,9 +742,6 @@ const FORMSPREE_ID = "xykljzpy";  // ← replace with your real Formspree form I
 
 function ContactPage({go}){
   const[email,setEmail]=useState("");
-  const[venueName,setVenueName]=useState("");
-  const[location,setLocation]=useState("");
-  const[frequency,setFrequency]=useState("");
   const[message,setMessage]=useState("");
   const[status,setStatus]=useState("idle"); // idle | sending | sent | error
   const[msg,setMsg]=useState("");
@@ -763,9 +760,6 @@ function ContactPage({go}){
         body:JSON.stringify({
           _replyto:email.trim(),
           email:email.trim(),
-          venue_name:venueName.trim()||"(not provided)",
-          location:location.trim()||"(not provided)",
-          frequency:frequency.trim()||"(not provided)",
           message:message.trim()
         })
       });
@@ -801,20 +795,8 @@ function ContactPage({go}){
             <input style={{...INP,marginTop:6}} type="email" placeholder="you@example.com" value={email} onChange={e=>setEmail(e.target.value)}/>
           </div>
           <div>
-            <label style={SUB}>VENUE NAME</label>
-            <input style={{...INP,marginTop:6}} placeholder="e.g. The Blue Note" value={venueName} onChange={e=>setVenueName(e.target.value)}/>
-          </div>
-          <div>
-            <label style={SUB}>LOCATION</label>
-            <input style={{...INP,marginTop:6}} placeholder="city, neighborhood, address…" value={location} onChange={e=>setLocation(e.target.value)}/>
-          </div>
-          <div>
-            <label style={SUB}>HOW OFTEN?</label>
-            <input style={{...INP,marginTop:6}} placeholder="e.g. every Thursday, twice a month…" value={frequency} onChange={e=>setFrequency(e.target.value)}/>
-          </div>
-          <div>
-            <label style={SUB}>MESSAGE <span style={{color:"var(--coral)"}}>*</span></label>
-            <textarea style={{...INP,marginTop:6,minHeight:100,resize:"vertical",lineHeight:1.5}} placeholder="Anything else we should know — how many performers, what kind of acts, how you run things now…" value={message} onChange={e=>setMessage(e.target.value)}/>
+            <label style={SUB}>TELL US ABOUT YOUR OPEN MIC <span style={{color:"var(--coral)"}}>*</span></label>
+            <textarea style={{...INP,marginTop:6,minHeight:160,resize:"vertical",lineHeight:1.5}} placeholder="Venue name, location, how often you host, what kind of acts, how many performers — whatever helps us get you set up." value={message} onChange={e=>setMessage(e.target.value)}/>
           </div>
           <button onClick={submit} disabled={status==="sending"} style={{...BTN,width:"100%",opacity:status==="sending"?0.5:!valid?0.7:1,marginTop:4}}>{status==="sending"?"SENDING…":"SEND MESSAGE →"}</button>
           <p style={{...BODY,fontSize:11,textAlign:"center",color:"var(--ink-light)",marginTop:-4}}>We'll reply to your email within a day or two.</p>
