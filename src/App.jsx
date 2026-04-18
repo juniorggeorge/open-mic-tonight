@@ -25,6 +25,19 @@ async function ldIdx() {
 }
 async function svIdx() { /* no-op — list comes from venues collection */ }
 
+// ─── Invite PINs ─────────────────────────────────────────────────
+async function ldPin(p) {
+  const snap = await getDoc(doc(db, "invitePins", p));
+  return snap.exists() ? snap.data() : null;
+}
+async function svPin(p, d) { await setDoc(doc(db, "invitePins", p), d); }
+async function dlPin(p) { await deleteDoc(doc(db, "invitePins", p)); }
+async function ldAllPins() {
+  const snap = await getDocs(collection(db, "invitePins"));
+  return snap.docs.map(d => ({ pin: d.id, ...d.data() }));
+}
+function genPin() { return String(Math.floor(100000 + Math.random() * 900000)); }
+
 // ─── Cleanup thresholds ───────────────────────────────────────────
 const SIX_MONTHS_MS = 1000 * 60 * 60 * 24 * 180;
 const WARN_WINDOW_MS = 1000 * 60 * 60 * 24 * 14; // show warning in last 2 weeks
@@ -274,22 +287,40 @@ function DirPage({go}){
 //  CREATE
 // ═══════════════════════════════════════════════════════════════════
 function CreatePage({go}){
-  const[auth,setAuth]=useState(false);const[pinIn,setPinIn]=useState("");
+  const[auth,setAuth]=useState(false);const[isAdmin,setIsAdmin]=useState(false);const[invitePin,setInvitePin]=useState(null);
+  const[pinIn,setPinIn]=useState("");
   const[name,setName]=useState("");const[sl,setSl]=useState("");const[pin,setPin]=useState("");
   const[tl,setTl]=useState(5);const[ts,setTs]=useState(12);const[msg,setMsg]=useState("");
   const[busy,setBusy]=useState(false);const[cust,setCust]=useState(false);
   const[limMode,setLimMode]=useState("time");const[spp,setSpp]=useState(2);
+  // Admin: invite pin management
+  const[pins,setPins]=useState([]);const[genBusy,setGenBusy]=useState(false);const[showPins,setShowPins]=useState(false);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   useEffect(()=>{if(!cust)setSl(slug(name))},[name,cust]);
-  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const now=Date.now();const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts,createdAt:now,lastHostSeen:now};await svV(sl,v);const idx=await ldIdx();addMyVenue(sl);go(`${sl}/host`)};
-  if(!auth){const tryP=()=>{if(pinIn==="4202"){setAuth(true);setPinIn("")}else flash("Wrong PIN")};
+  // Load existing invite PINs when admin authenticates
+  useEffect(()=>{if(isAdmin)(async()=>{try{setPins(await ldAllPins())}catch{}})()},[isAdmin]);
+  const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const now=Date.now();const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts,createdAt:now,lastHostSeen:now};await svV(sl,v);await ldIdx();addMyVenue(sl);
+    // If created with an invite PIN, consume it
+    if(invitePin){try{await dlPin(invitePin)}catch{}}
+    go(`${sl}/host`)};
+  const generatePin=async()=>{setGenBusy(true);try{let p=genPin();let ex=await ldPin(p);let tries=0;while(ex&&tries<10){p=genPin();ex=await ldPin(p);tries++}await svPin(p,{createdAt:Date.now()});setPins(prev=>[...prev,{pin:p,createdAt:Date.now()}]);flash(`PIN created: ${p}`)}catch{flash("Failed to generate PIN")}setGenBusy(false)};
+  const removePin=async p=>{try{await dlPin(p);setPins(prev=>prev.filter(x=>x.pin!==p));flash("PIN deleted")}catch{flash("Failed to delete")}};
+  const copyPin=p=>{navigator.clipboard?.writeText(p);flash(`Copied: ${p}`)};
+
+  if(!auth){const tryP=async()=>{
+    if(pinIn==="4202"){setAuth(true);setIsAdmin(true);setPinIn("");return}
+    // Check invite PINs
+    const ip=await ldPin(pinIn);
+    if(ip){setAuth(true);setIsAdmin(false);setInvitePin(pinIn);setPinIn("");return}
+    flash("Wrong PIN")};
     return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
       <div style={{maxWidth:460,width:"100%",marginTop:30}}>
         <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
         <div style={{...CARD,textAlign:"center"}} className="drift">
-          <div style={{fontSize:36,marginBottom:8}}>🔒</div><h2 style={{...TITLE,fontSize:24}}>Create Open Mic</h2><p style={{...BODY,marginTop:4}}>Enter admin PIN to continue.</p>
-          <input type="password" value={pinIn} onChange={e=>setPinIn(e.target.value)} placeholder="admin pin" style={{...INP,textAlign:"center",fontFamily:"'Overpass Mono',monospace",fontSize:18,letterSpacing:4,marginTop:16}} onKeyDown={e=>e.key==="Enter"&&tryP()}/>
+          <div style={{fontSize:36,marginBottom:8}}>🔒</div><h2 style={{...TITLE,fontSize:24}}>Create Open Mic</h2><p style={{...BODY,marginTop:4}}>Enter your PIN to continue.</p>
+          <input type="password" value={pinIn} onChange={e=>setPinIn(e.target.value)} placeholder="pin" style={{...INP,textAlign:"center",fontFamily:"'Overpass Mono',monospace",fontSize:18,letterSpacing:4,marginTop:16}} onKeyDown={e=>e.key==="Enter"&&tryP()}/>
           <button style={{...BTN,width:"100%",marginTop:12}} onClick={tryP}>UNLOCK →</button>
+          <p style={{...BODY,fontSize:11,marginTop:14,color:"var(--ink-light)"}}>Have an invite PIN? Enter it above.</p>
         </div>
       </div>
     </div>)}
@@ -297,13 +328,13 @@ function CreatePage({go}){
     <div style={{maxWidth:460,width:"100%",marginTop:30}}>
       <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
       <div style={CARD} className="drift">
-        <div style={{position:"absolute",top:-12,right:16,transform:"rotate(2deg)",...TAG("var(--ink)","var(--cream)"),fontSize:10}}>NEW</div>
+        <div style={{position:"absolute",top:-12,right:16,transform:"rotate(2deg)",...TAG("var(--ink)","var(--cream)"),fontSize:10}}>{invitePin?"INVITE":"NEW"}</div>
         <h2 style={{...TITLE,fontSize:26}}>Create Open Mic</h2>
-        <p style={{...BODY,marginTop:4,marginBottom:20}}>Set it up. Get a link. Run the show.</p>
+        <p style={{...BODY,marginTop:4,marginBottom:20}}>{invitePin?"You have a one-time invite. Set up your venue below.":"Set it up. Get a link. Run the show."}</p>
         <div style={{display:"flex",flexDirection:"column",gap:16}}>
           <div><label style={SUB}>NAME</label><input value={name} onChange={e=>setName(e.target.value)} placeholder="Thursday Night at Joe's" style={{...INP,marginTop:6}}/></div>
           <div><label style={SUB}>URL</label><input value={sl} onChange={e=>{setSl(slug(e.target.value));setCust(true)}} placeholder="thursday-joes" style={{...INP,marginTop:6,fontFamily:"'Overpass Mono',monospace",fontSize:14}}/><p style={{...BODY,fontSize:11,marginTop:4}}>link → <span style={{fontFamily:"'Overpass Mono',monospace",color:"var(--coral)"}}>#{sl||"…"}</span></p></div>
-          <div><label style={SUB}>HOST PIN</label><input value={pin} onChange={e=>setPin(e.target.value)} placeholder="secret (4+ chars)" type="password" style={{...INP,marginTop:6}}/></div>
+          <div><label style={SUB}>HOST PIN</label><input value={pin} onChange={e=>setPin(e.target.value)} placeholder="secret (4+ chars)" type="password" style={{...INP,marginTop:6}}/><p style={{...BODY,fontSize:11,marginTop:4}}>You'll use this to access your host dashboard.</p></div>
           <div>
             <label style={SUB}>PERFORMER LIMIT</label>
             <div style={{display:"flex",borderRadius:2,overflow:"hidden",border:"2px solid var(--ink)",marginTop:8,marginBottom:12}}>
@@ -322,6 +353,28 @@ function CreatePage({go}){
           <button onClick={create} disabled={busy} style={{...BTN,width:"100%",opacity:busy?0.5:1,marginTop:4}}>{busy?"CREATING…":"CREATE →"}</button>
         </div>
       </div>
+
+      {isAdmin&&<div style={{...CARD,marginTop:20}} className="drift-1">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <h3 style={{...TITLE,fontSize:20}}>Invite PINs</h3>
+          <button style={BTN_SM} onClick={()=>setShowPins(p=>!p)}>{showPins?"HIDE":"MANAGE"}</button>
+        </div>
+        <p style={{...BODY,marginTop:6,fontSize:12}}>Generate one-time PINs so hosts can create their own venue without the admin PIN.</p>
+        <button onClick={generatePin} disabled={genBusy} style={{...BTN,width:"100%",marginTop:12,background:"var(--teal)",borderColor:"var(--teal)",opacity:genBusy?0.5:1}}>{genBusy?"GENERATING…":"+ GENERATE INVITE PIN"}</button>
+        {showPins&&<div style={{marginTop:14}}>
+          {pins.length===0?<p style={{...BODY,fontSize:12,textAlign:"center",color:"var(--ink-light)"}}>No active invite PINs.</p>
+          :pins.map(p=><div key={p.pin} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 10px",marginTop:4,background:"var(--paper)",border:"1px solid var(--ink-faded)",borderRadius:2}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontFamily:"'Overpass Mono',monospace",fontSize:16,fontWeight:700,letterSpacing:2,color:"var(--ink)"}}>{p.pin}</span>
+              <span style={{...BODY,fontSize:10,color:"var(--ink-light)"}}>{fD(p.createdAt)}</span>
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={()=>copyPin(p.pin)} style={{...BTN_GHOST,fontSize:14,padding:"2px 6px"}} title="Copy">📋</button>
+              <button onClick={()=>removePin(p.pin)} style={{...BTN_GHOST,color:"var(--coral)",fontSize:14,padding:"2px 6px"}} title="Delete">×</button>
+            </div>
+          </div>)}
+        </div>}
+      </div>}
     </div>
   </div>);
 }
@@ -680,20 +733,92 @@ function HostPage({slug:SL,go}){
 // ═══════════════════════════════════════════════════════════════════
 //  CONTACT
 // ═══════════════════════════════════════════════════════════════════
+// ── Contact form config ────────────────────────────────────────────
+// Using Formspree (free). To set up:
+//  1. Sign up at https://formspree.io (free tier = 50 submissions/month)
+//  2. Create a new form → it emails submissions to your account email
+//  3. Paste the form ID below (the "xxxx" part of formspree.io/f/xxxx)
+const FORMSPREE_ID = "xykljzpy";  // ← replace with your real Formspree form ID
+
 function ContactPage({go}){
-  return(<div style={PAGE}><style>{CSS}</style>
+  const[email,setEmail]=useState("");
+  const[venueName,setVenueName]=useState("");
+  const[location,setLocation]=useState("");
+  const[frequency,setFrequency]=useState("");
+  const[message,setMessage]=useState("");
+  const[status,setStatus]=useState("idle"); // idle | sending | sent | error
+  const[msg,setMsg]=useState("");
+  const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3500)};
+
+  const valid=email.trim()&&/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())&&message.trim();
+
+  const submit=async()=>{
+    if(!email.trim()||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())){flash("Enter a valid email");return}
+    if(!message.trim()){flash("Tell us a bit about your open mic");return}
+    setStatus("sending");
+    try{
+      const res=await fetch(`https://formspree.io/f/${FORMSPREE_ID}`,{
+        method:"POST",
+        headers:{"Content-Type":"application/json","Accept":"application/json"},
+        body:JSON.stringify({
+          _replyto:email.trim(),
+          email:email.trim(),
+          venue_name:venueName.trim()||"(not provided)",
+          location:location.trim()||"(not provided)",
+          frequency:frequency.trim()||"(not provided)",
+          message:message.trim()
+        })
+      });
+      if(res.ok){setStatus("sent")}
+      else{const d=await res.json().catch(()=>({}));flash(d?.errors?.[0]?.message||"Something went wrong — try again");setStatus("error")}
+    }catch{flash("Network error — check your connection");setStatus("error")}
+  };
+
+  if(status==="sent")return(<div style={PAGE}><style>{CSS}</style>
     <div style={{maxWidth:460,width:"100%",marginTop:30}}>
       <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
       <div style={{...CARD,textAlign:"center"}} className="drift">
+        <div style={{fontSize:48,marginBottom:12}}>🎉</div>
+        <h2 style={{...TITLE,fontSize:26}}>Message sent!</h2>
+        <p style={{...BODY,marginTop:10,maxWidth:340,marginInline:"auto"}}>Thanks for reaching out. We'll get back to you at <strong style={{color:"var(--ink)"}}>{email}</strong> as soon as we can.</p>
+        <button onClick={()=>go("")} style={{...BTN,width:"100%",marginTop:24}}>← BACK TO DIRECTORY</button>
+      </div>
+    </div>
+  </div>);
+
+  return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
+    <div style={{maxWidth:460,width:"100%",marginTop:30}}>
+      <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
+      <div style={{...CARD}} className="drift">
         <div style={{position:"absolute",top:-12,right:16,transform:"rotate(2deg)",...TAG("var(--ink)","var(--cream)"),fontSize:10}}>INQUIRIES</div>
-        <div style={{fontSize:36,marginBottom:8}}>✉</div>
-        <h2 style={{...TITLE,fontSize:26}}>Want to host?</h2>
-        <p style={{...BODY,marginTop:10,marginBottom:20,maxWidth:340,marginInline:"auto"}}>We'd love to get your open mic set up on the platform. Reach out and we'll get you started.</p>
-        <div style={{background:"var(--paper-warm)",border:"2px dashed var(--ink-mid)",borderRadius:2,padding:"16px 20px"}}>
-          <p style={{...SUB,margin:"0 0 6px"}}>GET IN TOUCH</p>
-          <a href="mailto:jamesrh36@gmail.com" style={{fontFamily:"'Overpass Mono',monospace",fontSize:16,fontWeight:700,color:"var(--coral)",textDecoration:"none",wordBreak:"break-all"}}>jamesrh36@gmail.com</a>
+        <div style={{fontSize:36,marginBottom:4,textAlign:"center"}}>✉</div>
+        <h2 style={{...TITLE,fontSize:26,textAlign:"center"}}>Want to host?</h2>
+        <p style={{...BODY,marginTop:6,marginBottom:20,textAlign:"center",maxWidth:340,marginInline:"auto"}}>Tell us about your open mic and we'll get you set up.</p>
+
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <div>
+            <label style={SUB}>YOUR EMAIL <span style={{color:"var(--coral)"}}>*</span></label>
+            <input style={{...INP,marginTop:6}} type="email" placeholder="you@example.com" value={email} onChange={e=>setEmail(e.target.value)}/>
+          </div>
+          <div>
+            <label style={SUB}>VENUE NAME</label>
+            <input style={{...INP,marginTop:6}} placeholder="e.g. The Blue Note" value={venueName} onChange={e=>setVenueName(e.target.value)}/>
+          </div>
+          <div>
+            <label style={SUB}>LOCATION</label>
+            <input style={{...INP,marginTop:6}} placeholder="city, neighborhood, address…" value={location} onChange={e=>setLocation(e.target.value)}/>
+          </div>
+          <div>
+            <label style={SUB}>HOW OFTEN?</label>
+            <input style={{...INP,marginTop:6}} placeholder="e.g. every Thursday, twice a month…" value={frequency} onChange={e=>setFrequency(e.target.value)}/>
+          </div>
+          <div>
+            <label style={SUB}>MESSAGE <span style={{color:"var(--coral)"}}>*</span></label>
+            <textarea style={{...INP,marginTop:6,minHeight:100,resize:"vertical",lineHeight:1.5}} placeholder="Anything else we should know — how many performers, what kind of acts, how you run things now…" value={message} onChange={e=>setMessage(e.target.value)}/>
+          </div>
+          <button onClick={submit} disabled={status==="sending"} style={{...BTN,width:"100%",opacity:status==="sending"?0.5:!valid?0.7:1,marginTop:4}}>{status==="sending"?"SENDING…":"SEND MESSAGE →"}</button>
+          <p style={{...BODY,fontSize:11,textAlign:"center",color:"var(--ink-light)",marginTop:-4}}>We'll reply to your email within a day or two.</p>
         </div>
-        <p style={{...BODY,fontSize:12,marginTop:16,color:"var(--ink-light)"}}>Include your venue name, location, and how often you host — we'll take it from there.</p>
       </div>
     </div>
   </div>);
