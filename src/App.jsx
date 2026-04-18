@@ -625,7 +625,7 @@ function HostPage({slug:SL,go}){
           <p style={{...SUB,color:"var(--coral)",margin:0}}>ENDED · BOOKMARK THIS PAGE</p>
           <button style={{...BTN_SM,background:"var(--teal)",color:"var(--cream)",borderColor:"var(--teal)"}} onClick={()=>{persist({...st,archived:false});flash("Restored!")}}>↻ RESTORE</button>
         </div>
-        <p style={{...BODY,fontSize:12,marginBottom:10}}>Hidden from the directory. To re-host this same open mic later, bookmark this page now — it's the only way back in.</p>
+        <p style={{...BODY,fontSize:12,marginBottom:10}}>Hidden from the directory. To re-host this same open mic later, bookmark this page now.</p>
         <div style={{background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2,padding:"8px 10px",marginBottom:8,fontFamily:"'Overpass Mono',monospace",fontSize:11,color:"var(--ink)",wordBreak:"break-all",lineHeight:1.5}}>{typeof window!=="undefined"?`${window.location.origin}/#${SL}/host`:`/#${SL}/host`}</div>
         <button style={{...BTN_SM,width:"100%"}} onClick={copyHostLink}>📋 COPY HOST URL</button>
       </div>}
@@ -653,7 +653,7 @@ function HostPage({slug:SL,go}){
           <p style={{...SUB,color:"var(--coral)",margin:"0 0 10px"}}>DANGER ZONE</p>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <button style={{...BTN_SM,background:"var(--cream)",color:"var(--coral)",borderColor:"var(--coral)"}} onClick={()=>{if(confirm("Clear tonight's lineup? The venue stays active."))resetShow()}}>↺ RESET SHOW</button>
-            <button style={{...BTN_SM,background:"var(--coral)",color:"var(--cream)",borderColor:"var(--coral)",boxShadow:"2px 2px 0 var(--ink)"}} onClick={()=>{if(confirm("End this open mic?\n\nIt'll be removed from the directory. IMPORTANT: bookmark this page before leaving — it's how you'll get back to restore it later."))persist({...st,archived:true,signupOpen:false})}}>✕ END OPEN MIC</button>
+            <button style={{...BTN_SM,background:"var(--coral)",color:"var(--cream)",borderColor:"var(--coral)",boxShadow:"2px 2px 0 var(--ink)"}} onClick={()=>{if(confirm("End this open mic?\n\nUnless scheduling is enabled, it will be removed from the directory. IMPORTANT: bookmark this page before leaving — it's how you'll get back to restore it later."))persist({...st,archived:true,signupOpen:false})}}>✕ END OPEN MIC</button>
           </div>
           <p style={{...BODY,fontSize:11,marginTop:8}}>Reset clears tonight's performers. End hides the venue from the public directory (link still works).</p>
           <div style={{marginTop:14,paddingTop:14,borderTop:"1px dashed var(--ink-faded)"}}>
