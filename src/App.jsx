@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 */
 
 // ─── Storage ──────────────────────────────────────────────────────
-import { db, doc, getDoc, setDoc, collection, getDocs } from "./firebase";
+import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs } from "./firebase";
 
 async function ldV(s) {
   const snap = await getDoc(doc(db, "venues", s));
@@ -15,6 +15,9 @@ async function ldV(s) {
 }
 async function svV(s, d) {
   await setDoc(doc(db, "venues", s), d);
+}
+async function dlV(s) {
+  await deleteDoc(doc(db, "venues", s));
 }
 async function ldIdx() {
   const snap = await getDocs(collection(db, "venues"));
@@ -210,7 +213,7 @@ function DirPage({go}){
       <div style={{position:"absolute",top:-14,left:20,transform:"rotate(-3deg)",...TAG("var(--coral)","var(--cream)"),fontSize:10,padding:"4px 10px"}}>EST. TONIGHT</div>
       <h1 style={{...TITLE,fontSize:"clamp(32px,7vw,48px)",marginTop:8}}>Open Mic<br/>Tonight</h1>
       <p style={{...BODY,marginTop:8,maxWidth:300,marginInline:"auto"}}>Every venue gets a link. Performers sign up on their phone. Host runs the show.</p>
-      <button onClick={()=>go("create")} style={{...BTN,marginTop:20,width:"100%",fontSize:15}}
+      <button onClick={()=>go("contact")} style={{...BTN,marginTop:20,width:"100%",fontSize:15}}
         onMouseDown={e=>{e.currentTarget.style.transform="translate(2px,2px)";e.currentTarget.style.boxShadow="1px 1px 0 var(--shadow)"}}
         onMouseUp={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="3px 3px 0 var(--shadow)"}}>+ NEW OPEN MIC</button>
     </div>
@@ -263,6 +266,7 @@ function DirPage({go}){
 //  CREATE
 // ═══════════════════════════════════════════════════════════════════
 function CreatePage({go}){
+  const[auth,setAuth]=useState(false);const[pinIn,setPinIn]=useState("");
   const[name,setName]=useState("");const[sl,setSl]=useState("");const[pin,setPin]=useState("");
   const[tl,setTl]=useState(5);const[ts,setTs]=useState(12);const[msg,setMsg]=useState("");
   const[busy,setBusy]=useState(false);const[cust,setCust]=useState(false);
@@ -270,6 +274,17 @@ function CreatePage({go}){
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   useEffect(()=>{if(!cust)setSl(slug(name))},[name,cust]);
   const create=async()=>{if(!name.trim()){flash("Name it");return}if(!sl.trim()){flash("Need a URL");return}if(pin.length<4){flash("PIN: 4+ chars");return}setBusy(true);const ex=await ldV(sl);if(ex){flash("URL taken");setBusy(false);return}const now=Date.now();const v={...DS,eventName:name.trim(),hostPin:pin,limitMode:limMode,timePerSlot:tl,songsPerSlot:spp,totalSlots:ts,createdAt:now,lastHostSeen:now};await svV(sl,v);const idx=await ldIdx();addMyVenue(sl);go(`${sl}/host`)};
+  if(!auth){const tryP=()=>{if(pinIn==="4202"){setAuth(true);setPinIn("")}else flash("Wrong PIN")};
+    return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
+      <div style={{maxWidth:460,width:"100%",marginTop:30}}>
+        <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
+        <div style={{...CARD,textAlign:"center"}} className="drift">
+          <div style={{fontSize:36,marginBottom:8}}>🔒</div><h2 style={{...TITLE,fontSize:24}}>Create Open Mic</h2><p style={{...BODY,marginTop:4}}>Enter admin PIN to continue.</p>
+          <input type="password" value={pinIn} onChange={e=>setPinIn(e.target.value)} placeholder="admin pin" style={{...INP,textAlign:"center",fontFamily:"'Overpass Mono',monospace",fontSize:18,letterSpacing:4,marginTop:16}} onKeyDown={e=>e.key==="Enter"&&tryP()}/>
+          <button style={{...BTN,width:"100%",marginTop:12}} onClick={tryP}>UNLOCK →</button>
+        </div>
+      </div>
+    </div>)}
   return(<div style={PAGE}><style>{CSS}</style><Flash msg={msg}/>
     <div style={{maxWidth:460,width:"100%",marginTop:30}}>
       <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
@@ -341,6 +356,7 @@ function VenuePage({slug:SL,go}){
     else if(mw){persist({...st,waitlist:st.waitlist.filter(w=>w.deviceId!==did.current)})}
     flash("You're out. Thanks for letting us know!");
     setStep("form");
+    setVw("landing");
   };
   const saveEdit=()=>{if(!eN.trim()){flash("Name can't be empty");return}if(me){persist({...st,slots:{...st.slots,[String(me.slotNum)]:{...st.slots[String(me.slotNum)],name:eN.trim(),link:eL.trim()||null}}})}else if(mw){persist({...st,waitlist:st.waitlist.map(w=>w.deviceId===did.current?{...w,name:eN.trim(),link:eL.trim()||null}:w)})}flash("Updated!");setStep("form")};
   const repick=n=>{if(!me)return;const s={...st.slots};const p={...s[String(me.slotNum)]};delete s[String(me.slotNum)];s[String(n)]=p;persist({...st,slots:s});flash(`Moved to #${n}`);setStep("form")};
@@ -365,7 +381,7 @@ function VenuePage({slug:SL,go}){
           <p style={{...BODY,fontSize:11,marginTop:4,color:"var(--ink-light)"}}>Every {schD.map(d=>DAYS[d]).join(", ")}</p>
         </div>
         {addr(st)&&<p style={{...BODY,fontSize:12,marginTop:10,lineHeight:1.4}}>📌 {addr(st)}</p>}
-        <p style={{...BODY,fontSize:12,marginTop:12,textAlign:"center"}}>Signups open when the show starts. Check back then!</p>
+        <p style={{...BODY,fontSize:12,marginTop:12,textAlign:"center"}}>Check back later!</p>
       </>:st.archived?<>
         <div style={{marginTop:18,padding:"14px 16px",background:"var(--paper-warm)",border:"2px dashed var(--ink-faded)",borderRadius:2}}>
           <p style={{...BODY,margin:0}}>This open mic has ended. Check back later or find another venue.</p>
@@ -580,7 +596,7 @@ function HostPage({slug:SL,go}){
           </div>
           <p style={{...BODY,fontSize:11,marginTop:8}}>Reset clears tonight's performers. End hides the venue from the public directory (link still works).</p>
           <div style={{marginTop:14,paddingTop:14,borderTop:"1px dashed var(--ink-faded)"}}>
-            <button style={{...BTN_SM,background:"#2a0a0a",color:"#ff9a88",borderColor:"#2a0a0a",fontSize:11,padding:"7px 12px"}} onClick={()=>{const typed=prompt(`PERMANENT DELETE\n\nThis will erase "${st.eventName}" and everything in it — no way to recover.\n\nType the venue slug to confirm:\n  ${SL}`);if(typed===null)return;if(typed.trim()!==SL){alert("Slug didn't match. Nothing was deleted.");return}deleteForever()}}>☠ DELETE FOREVER</button>
+            <button style={{...BTN_SM,background:"#2a0a0a",color:"#ff9a88",borderColor:"#2a0a0a",fontSize:11,padding:"7px 12px"}} onClick={()=>{const typed=prompt(`PERMANENT DELETE\n\nThis will erase "${st.eventName}" and everything in it — no way to recover.\n\nType the venue name to confirm:\n  ${st.eventName}`);if(typed===null)return;if(typed.trim()!==st.eventName.trim()){alert("Name didn't match. Nothing was deleted.");return}deleteForever()}}>☠ DELETE FOREVER</button>
             <p style={{...BODY,fontSize:11,marginTop:6}}>Permanently wipes the venue. No recovery. Use End Open Mic instead if you might bring it back.</p>
           </div>
         </div>
@@ -654,6 +670,28 @@ function HostPage({slug:SL,go}){
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  CONTACT
+// ═══════════════════════════════════════════════════════════════════
+function ContactPage({go}){
+  return(<div style={PAGE}><style>{CSS}</style>
+    <div style={{maxWidth:460,width:"100%",marginTop:30}}>
+      <button onClick={()=>go("")} style={{...BTN_GHOST,marginBottom:16}}>← back</button>
+      <div style={{...CARD,textAlign:"center"}} className="drift">
+        <div style={{position:"absolute",top:-12,right:16,transform:"rotate(2deg)",...TAG("var(--ink)","var(--cream)"),fontSize:10}}>INQUIRIES</div>
+        <div style={{fontSize:36,marginBottom:8}}>✉</div>
+        <h2 style={{...TITLE,fontSize:26}}>Want to host?</h2>
+        <p style={{...BODY,marginTop:10,marginBottom:20,maxWidth:340,marginInline:"auto"}}>We'd love to get your open mic set up on the platform. Reach out and we'll get you started.</p>
+        <div style={{background:"var(--paper-warm)",border:"2px dashed var(--ink-mid)",borderRadius:2,padding:"16px 20px"}}>
+          <p style={{...SUB,margin:"0 0 6px"}}>GET IN TOUCH</p>
+          <a href="mailto:jamesrh36@gmail.com" style={{fontFamily:"'Overpass Mono',monospace",fontSize:16,fontWeight:700,color:"var(--coral)",textDecoration:"none",wordBreak:"break-all"}}>temp@email.com</a>
+        </div>
+        <p style={{...BODY,fontSize:12,marginTop:16,color:"var(--ink-light)"}}>Include your venue name, location, and how often you host — we'll take it from there.</p>
+      </div>
+    </div>
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  ROUTER
 // ═══════════════════════════════════════════════════════════════════
 export default function App(){
@@ -661,6 +699,7 @@ export default function App(){
   useEffect(()=>{const h=()=>setRoute(window.location.hash.slice(1)||"");window.addEventListener("hashchange",h);return()=>window.removeEventListener("hashchange",h)},[]);
   const go=p=>{window.location.hash=p};
   if(!route)return<DirPage go={go}/>;
+  if(route==="contact")return<ContactPage go={go}/>;
   if(route==="create")return<CreatePage go={go}/>;
   if(route.endsWith("/host"))return<HostPage slug={route.replace(/\/host$/,"")} go={go}/>;
   return<VenuePage slug={route} go={go}/>;
