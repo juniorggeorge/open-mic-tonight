@@ -224,7 +224,7 @@ function DirPage({go}){
   const live=venues.filter(v=>v.signupOpen&&!v.archived),rest=venues.filter(v=>!v.signupOpen&&!v.archived),upcoming=venues.filter(v=>v.archived&&isUpcoming(v));
   return(<div style={PAGE}><style>{CSS}</style>
     <div style={{...CARD,marginTop:40,textAlign:"center"}} className="drift">
-      <div style={{position:"absolute",top:-14,left:20,transform:"rotate(-3deg)",...TAG("var(--coral)","var(--cream)"),fontSize:10,padding:"4px 10px"}}>EST. TONIGHT</div>
+      <div style={{position:"absolute",top:-14,left:20,transform:"rotate(-3deg)",...TAG("var(--coral)","var(--cream)"),fontSize:10,padding:"4px 10px"}}>EST. 2026</div>
       <h1 style={{...TITLE,fontSize:"clamp(32px,7vw,48px)",marginTop:8}}>Open Mic<br/>Tonight</h1>
       <p style={{...BODY,marginTop:8,maxWidth:300,marginInline:"auto"}}>Every venue gets a link. Performers sign up on their phone. Host runs the show.</p>
       <button onClick={()=>go("contact")} style={{...BTN,marginTop:20,width:"100%",fontSize:15}}
@@ -796,7 +796,7 @@ function ContactPage({go}){
           </div>
           <div>
             <label style={SUB}>TELL US ABOUT YOUR OPEN MIC <span style={{color:"var(--coral)"}}>*</span></label>
-            <textarea style={{...INP,marginTop:6,minHeight:160,resize:"vertical",lineHeight:1.5}} placeholder="Venue name, location, how often you host, what kind of acts, how many performers — whatever helps us get you set up." value={message} onChange={e=>setMessage(e.target.value)}/>
+            <textarea style={{...INP,marginTop:6,minHeight:160,resize:"vertical",lineHeight:1.5}} placeholder="How can we help you run the best open mic ever!" value={message} onChange={e=>setMessage(e.target.value)}/>
           </div>
           <button onClick={submit} disabled={status==="sending"} style={{...BTN,width:"100%",opacity:status==="sending"?0.5:!valid?0.7:1,marginTop:4}}>{status==="sending"?"SENDING…":"SEND MESSAGE →"}</button>
           <p style={{...BODY,fontSize:11,textAlign:"center",color:"var(--ink-light)",marginTop:-4}}>We'll reply to your email within a day or two.</p>
