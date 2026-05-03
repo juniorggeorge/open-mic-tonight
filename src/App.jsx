@@ -57,7 +57,7 @@ function removeMyVenue(slug) { try { localStorage.setItem(MY_KEY, JSON.stringify
 // ─── Utils ────────────────────────────────────────────────────────
 const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MO=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",hostEmail:"",archived:false,createdAt:0,lastHostSeen:0,scheduleCloseEnabled:false,scheduleCloseAfter:3};
+const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",hostEmail:"",archived:false,createdAt:0,lastHostSeen:0,scheduleCloseEnabled:false,scheduleCloseAfter:3,updates:[]};
 
 function gid(){return Math.random().toString(36).slice(2,10)+Date.now().toString(36)}
 function slug(s){return s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,48)}
@@ -77,6 +77,7 @@ function prevF(sl,cur){for(let i=cur-1;i>=1;i--)if(sl[String(i)])return i;return
 function lowOpen(sl,tot){for(let i=1;i<=tot;i++)if(!sl[String(i)])return i;return null}
 function eUrl(s){if(!s)return"";const t=s.trim();return/^https?:\/\//i.test(t)?t:"https://"+t}
 function fHrs(h){if(h<=0)return"0h";const wh=Math.floor(h),m=Math.round((h-wh)*60);return m>0?`${wh}h ${m}m`:`${wh}h`}
+function fAgo(ts){const d=Date.now()-ts,m=Math.floor(d/60000);if(m<1)return"just now";if(m<60)return`${m}m ago`;const h=Math.floor(m/60);if(h<24)return`${h}h ago`;const dd=Math.floor(h/24);if(dd<7)return`${dd}d ago`;return fD(ts)}
 // For cleanup: returns effective "last host activity" timestamp. Grandfather
 // existing venues by pretending they were just seen if they have no stamp.
 function lastSeen(v,graceFrom){if(v.lastHostSeen)return v.lastHostSeen;if(v.createdAt)return v.createdAt;return graceFrom}
@@ -179,6 +180,17 @@ function Toggle({on,onToggle,label}){
 }
 function Flash({msg}){if(!msg)return null;return<div style={FLASH_S}>{msg}</div>}
 function Tape({children,color}){return<span style={{...TAG(color||"var(--paper-warm)","var(--ink)"),transform:`rotate(${(Math.random()*2-1).toFixed(1)}deg)`}}>{children}</span>}
+function UpdFeed({updates}){
+  if(!updates||updates.length===0)return null;
+  const sorted=[...updates].sort((a,b)=>b.createdAt-a.createdAt);
+  return(<div style={{marginTop:16}}>
+    {sorted.map((u,i)=><div key={u.id} style={{background:"#fff8e8",border:"2px solid var(--coral)",borderRadius:2,padding:"12px 14px",marginBottom:10,transform:`rotate(${i%2?0.3:-0.3}deg)`,boxShadow:"3px 3px 0 var(--shadow)",position:"relative"}}>
+      <p style={{...SUB,margin:"0 0 6px",color:"var(--coral)",fontSize:9}}>📣 FROM THE HOST</p>
+      <p style={{color:"var(--ink)",fontSize:14,lineHeight:1.5,whiteSpace:"pre-wrap",margin:0,fontFamily:"'Lexend',sans-serif"}}>{u.text}</p>
+      <p style={{fontSize:11,marginTop:8,color:"var(--ink-light)",fontFamily:"'Overpass Mono',monospace",margin:"8px 0 0"}}>{fAgo(u.createdAt)}{u.updatedAt?` · edited ${fAgo(u.updatedAt)}`:""}</p>
+    </div>)}
+  </div>);
+}
 
 // ─── SlotGrid ─────────────────────────────────────────────────────
 function SlotGrid({slots,totalSlots,currentSlot,onDeckSlot,onMove,onRemove,onClearLink}){
@@ -229,7 +241,7 @@ function sameDay(a,b){const d1=new Date(a),d2=new Date(b);return d1.getFullYear(
 //   • useSchVenue — new-day reset only. Runs on the public venue page so
 //     signups can auto-open at the scheduled time even if the host hasn't
 //     opened the dashboard yet. Auto-close/archive is host-only.
-function _newWindowReset(){return{signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false,archived:false}}
+function _newWindowReset(){return{signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false,archived:false,updates:[]}}
 function useSchHost(st,slug,enabled){
   useEffect(()=>{
     if(!enabled||!st.scheduleEnabled)return;
@@ -516,6 +528,8 @@ function VenuePage({slug:SL,go}){
         {st.archived?<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>:st.signupOpen?<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>:<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>CLOSED</span>}
       </div>
 
+      <UpdFeed updates={st.updates}/>
+
       {st.archived&&nextShow?<>
         <div style={{marginTop:18,padding:"14px 16px",background:"#fff8e8",border:"2px dashed var(--coral)",borderRadius:2}}>
           <p style={{...SUB,color:"var(--coral)",margin:"0 0 4px"}}>COMING UP</p>
@@ -640,6 +654,7 @@ function VenuePage({slug:SL,go}){
       <p style={SUB}>{st.eventName}</p><h2 style={{...TITLE,fontSize:24,marginTop:4}}>Lineup</h2>
       <p style={{...BODY,fontSize:12,marginTop:4}}>📅 {fD(st.showDate||Date.now())} · {cnt} acts · {st.limitMode==="time"?`${st.timePerSlot}min`:`${st.songsPerSlot} songs`}/act</p>
       {addr(st)&&<p style={{...BODY,fontSize:12,marginTop:4,lineHeight:1.4}}>📌 {addr(st)}</p>}
+      <UpdFeed updates={st.updates}/>
       {curP2&&<div style={{marginTop:16,padding:16,background:"#fff8e8",border:"2px solid var(--coral)",borderRadius:2}}>
         <p style={{...SUB,color:"var(--coral)",margin:"0 0 4px"}}>NOW ON STAGE — #{st.currentSlot}</p>
         <p style={{fontFamily:"'Fraunces',serif",fontSize:24,fontWeight:900}}>{curP2.name}</p>
@@ -665,6 +680,7 @@ function HostPage({slug:SL,go}){
   const[st,setSt]=useState(DS);const[ld,setLd]=useState(false);const[auth,setAuth]=useState(false);
   const[pinIn,setPinIn]=useState("");const[msg,setMsg]=useState("");const[tab,setTab]=useState("show");const[aN,setAN]=useState("");
   const[aQ,setAQ]=useState("");const[aR,setAR]=useState([]);const[aL,setAL2]=useState(false);
+  const[uN,setUN]=useState("");const[edId,setEdId]=useState(null);const[edTxt,setEdTxt]=useState("");
   const refresh=useCallback(async()=>{const v=await ldV(SL);if(v)setSt(p=>({...p,...v}));setLd(true)},[SL]);
   useEffect(()=>{refresh();const id=setInterval(refresh,4000);return()=>clearInterval(id)},[refresh]);
   const persist=useCallback(async n=>{setSt(n);await svV(SL,n)},[SL]);
@@ -687,13 +703,18 @@ function HostPage({slug:SL,go}){
   const goBack=()=>{const prv=prevF(st.slots,st.currentSlot);if(!prv){flash("No previous performer");return}const pd=[...(st.performedDevices||[])];const prvP=st.slots[String(prv)];if(prvP&&prvP.deviceId){const i=pd.indexOf(prvP.deviceId);if(i>=0)pd.splice(i,1)}persist({...st,currentSlot:prv,performedDevices:pd});flash(`← Back to #${prv}`)};
   const rmSlot=n=>{const s={...st.slots};delete s[String(n)];persist(compAndPromote({...st,slots:s}))};
   const hostAdd=()=>{if(!aN.trim()){flash("Enter name");return}let sl=lowOpen(st.slots,st.totalSlots);let newTot=st.totalSlots;let expanded=false;if(!sl){if(st.totalSlots>=50){flash("Max slots (50) reached");return}newTot=st.totalSlots+1;sl=newTot;expanded=true}persist({...st,totalSlots:newTot,slots:{...st.slots,[String(sl)]:{id:gid(),name:aN.trim(),deviceId:"host",time:Date.now()}},showDate:st.showDate||Date.now()});flash(expanded?`Added #${sl} (+1 slot)`:`Added #${sl}`);setAN("")};
-  const resetShow=()=>persist({...st,slots:{},waitlist:[],currentSlot:0,signupOpen:false,showDate:null,manualOverride:false,performedDevices:[]});
+  const resetShow=()=>persist({...st,slots:{},waitlist:[],currentSlot:0,signupOpen:false,showDate:null,manualOverride:false,performedDevices:[],updates:[]});
   const deleteForever=async()=>{await dlV(SL);removeMyVenue(SL);go("")};
   const togDay=d=>{const dy=[...schD];const i=dy.indexOf(d);if(i>=0)dy.splice(i,1);else dy.push(d);dy.sort((a,b)=>a-b);persist({...st,scheduleDays:dy})};
   const setVGPS=()=>{if(!navigator.geolocation){flash("No geolocation");return}flash("Getting location…");navigator.geolocation.getCurrentPosition(p=>{persist({...st,venueLat:p.coords.latitude,venueLng:p.coords.longitude,venueAddress:st.venueAddress||"Current location"});flash("Pinned to current location!")},()=>flash("Failed"),{enableHighAccuracy:true,timeout:10000})};
   const searchAddr=async()=>{if(!aQ.trim())return;setAL2(true);setAR([]);try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(aQ.trim())}`);const d=await r.json();setAR(d.map(r=>({name:r.display_name,lat:parseFloat(r.lat),lng:parseFloat(r.lon)})));if(d.length===0)flash("No results")}catch{flash("Search failed")}setAL2(false)};
   const setVFrom=r=>{persist({...st,venueLat:r.lat,venueLng:r.lng,venueAddress:r.name});setAR([]);setAQ("");flash("Address saved!")};
   const clearAddr=()=>{persist({...st,venueAddress:"",venueLat:null,venueLng:null,geofenceEnabled:false});flash("Cleared")};
+  const addUpd=()=>{if(!uN.trim()){flash("Write something first");return}persist({...st,updates:[...(st.updates||[]),{id:gid(),text:uN.trim(),createdAt:Date.now()}]});setUN("");flash("Update posted!")};
+  const rmUpd=id=>{if(!confirm("Remove this update?"))return;persist({...st,updates:(st.updates||[]).filter(u=>u.id!==id)})};
+  const startEdUpd=u=>{setEdId(u.id);setEdTxt(u.text)};
+  const saveEdUpd=()=>{if(!edTxt.trim()){flash("Can't be empty");return}persist({...st,updates:(st.updates||[]).map(u=>u.id===edId?{...u,text:edTxt.trim(),updatedAt:Date.now()}:u)});setEdId(null);setEdTxt("");flash("Updated!")};
+  const cancelEdUpd=()=>{setEdId(null);setEdTxt("")};
   const copyLink=()=>{const b=window.location.href.replace(/#.*$/,"");navigator.clipboard?.writeText(`${b}#${SL}`);flash("Link copied!")};
   const copyHostLink=()=>{const b=window.location.href.replace(/#.*$/,"");navigator.clipboard?.writeText(`${b}#${SL}/host`);flash("Host link copied!")};
   return(<div style={{...PAGE,alignItems:"center",paddingTop:16}}><style>{CSS}</style><Flash msg={msg}/>
@@ -734,6 +755,32 @@ function HostPage({slug:SL,go}){
           <SlotGrid slots={st.slots} totalSlots={st.totalSlots} currentSlot={st.currentSlot} onDeckSlot={odS} onMove={(f,t)=>persist({...st,slots:mvSlot(st.slots,st.totalSlots,f,t)})} onRemove={rmSlot} onClearLink={n=>{const p=st.slots[String(n)];if(p){const{link,...r}=p;persist({...st,slots:{...st.slots,[String(n)]:r}})}}}/>
         </div>
         {st.waitlist.length>0&&<div style={{...SECT,marginTop:8}}><p style={{...SUB,margin:"0 0 6px"}}>WAITLIST ({st.waitlist.length})</p>{st.waitlist.map((p,i)=><div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 8px"}}><span style={{...BODY,fontSize:13}}>{i+1}. {p.name}</span><button onClick={()=>persist({...st,waitlist:st.waitlist.filter(w=>w.id!==p.id)})} style={{...BTN_GHOST,color:"var(--coral)",fontSize:14}}>×</button></div>)}</div>}
+        <div style={{...SECT,marginTop:10}}>
+          <p style={{...SUB,margin:"0 0 4px"}}>📣 UPDATES ({(st.updates||[]).length})</p>
+          <p style={{...BODY,fontSize:11,marginBottom:10}}>Post announcements visible to everyone on the venue page. Great for "starting late," themes, guest announcements, etc.</p>
+          <textarea style={{...INP,minHeight:64,resize:"vertical",lineHeight:1.4}} placeholder="e.g. 'Show starting at 8 tonight!' or 'Theme: love songs'" value={uN} onChange={e=>setUN(e.target.value)}/>
+          <button style={{...BTN,width:"100%",marginTop:8}} onClick={addUpd}>POST UPDATE →</button>
+          {(st.updates||[]).length>0&&<div style={{marginTop:14}}>
+            {[...(st.updates||[])].sort((a,b)=>b.createdAt-a.createdAt).map(u=><div key={u.id} style={{padding:"10px 12px",marginBottom:6,background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2}}>
+              {edId===u.id?<>
+                <textarea style={{...INP,minHeight:64,resize:"vertical",lineHeight:1.4}} value={edTxt} onChange={e=>setEdTxt(e.target.value)} autoFocus/>
+                <div style={{display:"flex",gap:6,marginTop:8}}>
+                  <button style={{...BTN_SM,background:"var(--ink)",color:"var(--cream)"}} onClick={saveEdUpd}>SAVE</button>
+                  <button style={{...BTN_SM,background:"var(--paper)"}} onClick={cancelEdUpd}>CANCEL</button>
+                </div>
+              </>:<>
+                <p style={{color:"var(--ink)",fontSize:13,lineHeight:1.5,whiteSpace:"pre-wrap",margin:0}}>{u.text}</p>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8}}>
+                  <span style={{fontSize:10,color:"var(--ink-light)",fontFamily:"'Overpass Mono',monospace"}}>{fAgo(u.createdAt)}{u.updatedAt?" · edited":""}</span>
+                  <div style={{display:"flex",gap:4}}>
+                    <button onClick={()=>startEdUpd(u)} style={{...BTN_GHOST,fontSize:11,padding:"2px 8px"}}>edit</button>
+                    <button onClick={()=>rmUpd(u.id)} style={{...BTN_GHOST,color:"var(--coral)",fontSize:16,padding:"2px 8px",lineHeight:1}}>×</button>
+                  </div>
+                </div>
+              </>}
+            </div>)}
+          </div>}
+        </div>
         <div style={{marginTop:22,paddingTop:16,borderTop:"1px dashed var(--ink-faded)"}}>
           <p style={{...SUB,color:"var(--coral)",margin:"0 0 10px"}}>DANGER ZONE</p>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
