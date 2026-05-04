@@ -7,7 +7,10 @@ import { useState, useEffect, useCallback, useRef } from "react";
 */
 
 // ─── Storage ──────────────────────────────────────────────────────
-import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, updateDoc } from "./firebase";
+// NOTE: firebase.js must also export `runTransaction` and `deleteField`.
+// If you haven't already, add them to the firebase.js re-exports:
+//   export { runTransaction, deleteField } from "firebase/firestore";
+import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, updateDoc, runTransaction, deleteField } from "./firebase";
 
 async function ldV(s) {
   const snap = await getDoc(doc(db, "venues", s));
@@ -57,7 +60,7 @@ function removeMyVenue(slug) { try { localStorage.setItem(MY_KEY, JSON.stringify
 // ─── Utils ────────────────────────────────────────────────────────
 const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MO=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",hostEmail:"",archived:false,createdAt:0,lastHostSeen:0,scheduleCloseEnabled:false,scheduleCloseAfter:3,updates:[]};
+const DS={signupOpen:false,totalSlots:12,limitMode:"time",timePerSlot:5,songsPerSlot:2,slots:{},currentSlot:0,eventName:"Open Mic Night",waitlist:[],venueAddress:"",venueLat:null,venueLng:null,venueRadius:150,geofenceEnabled:false,venueName:"",scheduleEnabled:false,scheduleDays:[4],scheduleOpenHour:18,scheduleOpenMin:30,scheduleShowHour:19,scheduleShowMin:0,scheduleDuration:30,showDate:null,manualOverride:false,performedDevices:[],allowLinks:false,hostPin:"",hostEmail:"",archived:false,createdAt:0,lastHostSeen:0,scheduleCloseEnabled:false,scheduleCloseAfter:3};
 
 function gid(){return Math.random().toString(36).slice(2,10)+Date.now().toString(36)}
 function slug(s){return s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,48)}
@@ -77,7 +80,6 @@ function prevF(sl,cur){for(let i=cur-1;i>=1;i--)if(sl[String(i)])return i;return
 function lowOpen(sl,tot){for(let i=1;i<=tot;i++)if(!sl[String(i)])return i;return null}
 function eUrl(s){if(!s)return"";const t=s.trim();return/^https?:\/\//i.test(t)?t:"https://"+t}
 function fHrs(h){if(h<=0)return"0h";const wh=Math.floor(h),m=Math.round((h-wh)*60);return m>0?`${wh}h ${m}m`:`${wh}h`}
-function fAgo(ts){const d=Date.now()-ts,m=Math.floor(d/60000);if(m<1)return"just now";if(m<60)return`${m}m ago`;const h=Math.floor(m/60);if(h<24)return`${h}h ago`;const dd=Math.floor(h/24);if(dd<7)return`${dd}d ago`;return fD(ts)}
 // For cleanup: returns effective "last host activity" timestamp. Grandfather
 // existing venues by pretending they were just seen if they have no stamp.
 function lastSeen(v,graceFrom){if(v.lastHostSeen)return v.lastHostSeen;if(v.createdAt)return v.createdAt;return graceFrom}
@@ -95,6 +97,310 @@ function compAndPromote(s){
   let w=s.waitlist||[];
   if(w.length>0&&p<=s.totalSlots){const[wl,...r]=w;sl[String(p)]=wl;w=r}
   return{...s,slots:sl,waitlist:w}
+}
+
+// ─── Transactions ─────────────────────────────────────────────────
+// Atomic writes for high-contention paths. Each transaction reads the
+// current document, validates against fresh server state, and writes
+// only the fields that need to change. Firestore guarantees atomicity:
+// if anyone else writes between our read and write, the transaction
+// auto-retries (up to 5 attempts) before throwing.
+//
+// Why these specific operations? Anything that:
+//   (a) reads state, computes a result, then writes — risks staleness
+//   (b) shares a write target with concurrent users — risks clobbering
+// gets a transaction. Settings edits and similar single-field writes
+// don't need this; they use upV (narrow updateDoc) instead.
+
+const STALE_PENDING_MS = 90 * 1000; // pending reservations expire after 90s
+
+// Pure helper: returns the dropOut/rmSlot result from FRESH server state.
+// Inlined compAndPromote so we operate on transaction-read data, not local.
+function _computeDropResult(data,dropSlotNum){
+  const slots={...(data.slots||{})};
+  delete slots[String(dropSlotNum)];
+  const total=data.totalSlots||0;
+  const c=data.currentSlot||0;
+  const futureSlot=c===0||dropSlotNum>c;
+  let waitlist=data.waitlist||[];
+  if(!futureSlot)return{slots,waitlist,promoted:null};
+  const upcoming=[];
+  for(let i=c+1;i<=total;i++){const k=String(i);if(slots[k]){upcoming.push(slots[k]);delete slots[k]}}
+  let p=c+1;
+  for(const x of upcoming)slots[String(p++)]=x;
+  let promoted=null;
+  if(waitlist.length>0&&p<=total){
+    slots[String(p)]=waitlist[0];
+    promoted=waitlist[0].name;
+    waitlist=waitlist.slice(1);
+  }
+  return{slots,waitlist,promoted};
+}
+
+// Atomic slot claim. Throws "SLOT_TAKEN", "VENUE_GONE",
+// "DEVICE_ALREADY_IN", or "SIGNUP_CLOSED". Stale pending reservations
+// (older than STALE_PENDING_MS) are treated as free and overwritten.
+async function claimSlot(slug,slotNum,entry){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    if(!data.signupOpen||data.archived)throw new Error("SIGNUP_CLOSED");
+    const slots=data.slots||{};
+    const existing=slots[String(slotNum)];
+    if(existing){
+      const since=existing.pendingSince||existing.time||0;
+      const isStale=existing.pending&&(Date.now()-since>STALE_PENDING_MS);
+      if(!isStale)throw new Error("SLOT_TAKEN");
+    }
+    for(const[k,v]of Object.entries(slots)){
+      if(k===String(slotNum))continue;
+      if(v&&v.deviceId===entry.deviceId)throw new Error("DEVICE_ALREADY_IN");
+    }
+    tx.update(ref,{
+      [`slots.${slotNum}`]:entry,
+      showDate:data.showDate||Date.now(),
+    });
+  });
+}
+
+// Atomic re-pick: move my reservation from one slot to another.
+// Same race risks as claimSlot, plus the cleanup of the old slot
+// must be atomic with the new claim — otherwise we could end up with
+// two slots or zero slots if interrupted.
+async function repickSlotTx(slug,fromSlot,toSlot,deviceId){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    const slots={...(data.slots||{})};
+    const mine=slots[String(fromSlot)];
+    if(!mine||mine.deviceId!==deviceId)throw new Error("NOT_MINE");
+    const target=slots[String(toSlot)];
+    if(target){
+      const since=target.pendingSince||target.time||0;
+      const isStale=target.pending&&(Date.now()-since>STALE_PENDING_MS);
+      if(!isStale)throw new Error("SLOT_TAKEN");
+    }
+    tx.update(ref,{
+      [`slots.${fromSlot}`]:deleteField(),
+      [`slots.${toSlot}`]:mine,
+    });
+  });
+}
+
+// Atomic host quick-add. Finds the lowest open slot from FRESH state,
+// expanding total slots by one if the show is full (up to 50).
+async function hostAddPerformer(slug,name){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    const slots=data.slots||{};
+    const total=data.totalSlots||0;
+    let target=null;
+    for(let i=1;i<=total;i++){
+      const k=String(i),v=slots[k];
+      if(!v){target=i;break}
+      const since=v.pendingSince||v.time||0;
+      if(v.pending&&(Date.now()-since>STALE_PENDING_MS)){target=i;break}
+    }
+    let newTotal=total;
+    if(target===null){
+      if(total>=50)throw new Error("MAX_SLOTS");
+      newTotal=total+1;
+      target=newTotal;
+    }
+    const entry={id:gid(),name:name.trim(),deviceId:"host",time:Date.now()};
+    const updates={
+      [`slots.${target}`]:entry,
+      showDate:data.showDate||Date.now(),
+    };
+    if(newTotal!==total)updates.totalSlots=newTotal;
+    tx.update(ref,updates);
+    return{slot:target,expanded:newTotal!==total};
+  });
+}
+
+// Atomic advance. Reads currentSlot from fresh state, computes the next
+// performed device, runs compress-and-promote on fresh slots, writes only
+// what changed. Throws "NO_MORE" if there's no next performer.
+async function advanceTx(slug){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    const cur=data.currentSlot||0;
+    const total=data.totalSlots||0;
+    const slots=data.slots||{};
+    const nxt=nextF(slots,total,cur);
+    if(!nxt)throw new Error("NO_MORE");
+    const pd=[...(data.performedDevices||[])];
+    if(cur>0&&slots[String(cur)]){
+      const di=slots[String(cur)].deviceId;
+      if(di&&!pd.includes(di))pd.push(di);
+    }
+    // Inline compAndPromote on fresh data, with currentSlot=nxt.
+    const newSlots={...slots};
+    const upcoming=[];
+    for(let i=nxt+1;i<=total;i++){const k=String(i);if(newSlots[k]){upcoming.push(newSlots[k]);delete newSlots[k]}}
+    let p=nxt+1;
+    for(const x of upcoming)newSlots[String(p++)]=x;
+    let waitlist=data.waitlist||[];
+    if(waitlist.length>0&&p<=total){
+      newSlots[String(p)]=waitlist[0];
+      waitlist=waitlist.slice(1);
+    }
+    tx.update(ref,{slots:newSlots,waitlist,currentSlot:nxt,performedDevices:pd});
+  });
+}
+
+// Atomic go-back: previous performer (undoes a skip). Reads fresh state
+// to determine the previous filled slot.
+async function goBackTx(slug){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    const prv=prevF(data.slots||{},data.currentSlot||0);
+    if(!prv)throw new Error("NO_PREV");
+    const pd=[...(data.performedDevices||[])];
+    const prvP=(data.slots||{})[String(prv)];
+    if(prvP&&prvP.deviceId){
+      const i=pd.indexOf(prvP.deviceId);
+      if(i>=0)pd.splice(i,1);
+    }
+    tx.update(ref,{currentSlot:prv,performedDevices:pd});
+    return{slot:prv};
+  });
+}
+
+// Atomic dropout (performer drops self from lineup or waitlist).
+async function dropOutTx(slug,deviceId){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    const slots=data.slots||{};
+    let mySlotNum=null;
+    for(const[k,v]of Object.entries(slots)){
+      if(v&&v.deviceId===deviceId){mySlotNum=Number(k);break}
+    }
+    const waitlist=data.waitlist||[];
+    const inWaitlist=waitlist.some(w=>w.deviceId===deviceId);
+    if(mySlotNum===null&&!inWaitlist)return{dropped:false,promoted:null};
+    if(mySlotNum!==null){
+      const{slots:newSlots,waitlist:newWaitlist,promoted}=_computeDropResult(data,mySlotNum);
+      tx.update(ref,{slots:newSlots,waitlist:newWaitlist});
+      return{dropped:true,promoted};
+    }else{
+      tx.update(ref,{waitlist:waitlist.filter(w=>w.deviceId!==deviceId)});
+      return{dropped:true,promoted:null};
+    }
+  });
+}
+
+// Atomic host removes a performer from a specific slot.
+async function rmSlotTx(slug,slotNum){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    if(!(data.slots||{})[String(slotNum)])return{removed:false};
+    const{slots:newSlots,waitlist:newWaitlist}=_computeDropResult(data,slotNum);
+    tx.update(ref,{slots:newSlots,waitlist:newWaitlist});
+    return{removed:true};
+  });
+}
+
+// Atomic move (host drag-rearranges slots). Reads fresh state so a
+// concurrent signup to a third slot isn't clobbered.
+async function mvSlotTx(slug,from,to){
+  if(from===to)return;
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    const newSlots=mvSlot(data.slots||{},data.totalSlots||0,from,to);
+    tx.update(ref,{slots:newSlots});
+  });
+}
+
+// Atomic clear-link on a slot. Narrow update touching only that slot.
+async function clearSlotLinkTx(slug,slotNum){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())return;
+    const slots=snap.data().slots||{};
+    const p=slots[String(slotNum)];
+    if(!p||!p.link)return;
+    const{link,...rest}=p;
+    tx.update(ref,{[`slots.${slotNum}`]:rest});
+  });
+}
+
+// Atomic waitlist remove (host removes a waitlister by id).
+async function rmWaitlistTx(slug,waitlistId){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())return;
+    const wl=snap.data().waitlist||[];
+    tx.update(ref,{waitlist:wl.filter(w=>w.id!==waitlistId)});
+  });
+}
+
+// Atomic waitlist append (performer joins waitlist when slots are full).
+async function joinWaitlistTx(slug,entry){
+  const ref=doc(db,"venues",slug);
+  return await runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    if(!snap.exists())throw new Error("VENUE_GONE");
+    const data=snap.data();
+    if(!data.signupOpen||data.archived)throw new Error("SIGNUP_CLOSED");
+    const wl=data.waitlist||[];
+    if(wl.some(w=>w.deviceId===entry.deviceId))throw new Error("ALREADY_WAITLISTED");
+    const slots=data.slots||{};
+    for(const v of Object.values(slots)){
+      if(v&&v.deviceId===entry.deviceId)throw new Error("DEVICE_ALREADY_IN");
+    }
+    tx.update(ref,{waitlist:[...wl,entry]});
+  });
+}
+
+// Stale pending reaper. Clears any reservation older than STALE_PENDING_MS
+// where pending===true. Best-effort: failures retry on next tick.
+async function reapStalePending(slug){
+  const ref=doc(db,"venues",slug);
+  try{
+    await runTransaction(db,async tx=>{
+      const snap=await tx.get(ref);
+      if(!snap.exists())return;
+      const slots=snap.data().slots||{};
+      const now=Date.now();
+      const updates={};
+      let dirty=false;
+      for(const[k,v]of Object.entries(slots)){
+        if(v&&v.pending){
+          const since=v.pendingSince||v.time||0;
+          if(now-since>STALE_PENDING_MS){
+            updates[`slots.${k}`]=deleteField();
+            dirty=true;
+          }
+        }
+      }
+      if(dirty)tx.update(ref,updates);
+    });
+  }catch{/* best-effort; next tick will retry */}
 }
 
 // ─── CSS ──────────────────────────────────────────────────────────
@@ -180,17 +486,6 @@ function Toggle({on,onToggle,label}){
 }
 function Flash({msg}){if(!msg)return null;return<div style={FLASH_S}>{msg}</div>}
 function Tape({children,color}){return<span style={{...TAG(color||"var(--paper-warm)","var(--ink)"),transform:`rotate(${(Math.random()*2-1).toFixed(1)}deg)`}}>{children}</span>}
-function UpdFeed({updates}){
-  if(!updates||updates.length===0)return null;
-  const sorted=[...updates].sort((a,b)=>b.createdAt-a.createdAt);
-  return(<div style={{marginTop:16}}>
-    {sorted.map((u,i)=><div key={u.id} style={{background:"#fff8e8",border:"2px solid var(--coral)",borderRadius:2,padding:"12px 14px",marginBottom:10,transform:`rotate(${i%2?0.3:-0.3}deg)`,boxShadow:"3px 3px 0 var(--shadow)",position:"relative"}}>
-      <p style={{...SUB,margin:"0 0 6px",color:"var(--coral)",fontSize:9}}>📣 FROM THE HOST</p>
-      <p style={{color:"var(--ink)",fontSize:14,lineHeight:1.5,whiteSpace:"pre-wrap",margin:0,fontFamily:"'Lexend',sans-serif"}}>{u.text}</p>
-      <p style={{fontSize:11,marginTop:8,color:"var(--ink-light)",fontFamily:"'Overpass Mono',monospace",margin:"8px 0 0"}}>{fAgo(u.createdAt)}{u.updatedAt?` · edited ${fAgo(u.updatedAt)}`:""}</p>
-    </div>)}
-  </div>);
-}
 
 // ─── SlotGrid ─────────────────────────────────────────────────────
 function SlotGrid({slots,totalSlots,currentSlot,onDeckSlot,onMove,onRemove,onClearLink}){
@@ -241,7 +536,7 @@ function sameDay(a,b){const d1=new Date(a),d2=new Date(b);return d1.getFullYear(
 //   • useSchVenue — new-day reset only. Runs on the public venue page so
 //     signups can auto-open at the scheduled time even if the host hasn't
 //     opened the dashboard yet. Auto-close/archive is host-only.
-function _newWindowReset(){return{signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false,archived:false,updates:[]}}
+function _newWindowReset(){return{signupOpen:true,slots:{},waitlist:[],currentSlot:0,showDate:Date.now(),performedDevices:[],manualOverride:false,archived:false}}
 function useSchHost(st,slug,enabled){
   useEffect(()=>{
     if(!enabled||!st.scheduleEnabled)return;
@@ -468,7 +763,6 @@ function VenuePage({slug:SL,go}){
   const did=useRef(devId());const geo=useGeo(st);
   const refresh=useCallback(async()=>{const v=await ldV(SL);if(v)setSt(p=>({...p,...v}));setLd(true)},[SL]);
   useEffect(()=>{refresh();const id=setInterval(refresh,3000);return()=>clearInterval(id)},[refresh]);
-  const persist=useCallback(n=>{setSt(n);svV(SL,n)},[SL]);
   useSchVenue(st,SL);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   const cnt=filled(st.slots).length;const os=[];for(let i=1;i<=st.totalSlots;i++)if(!st.slots[String(i)])os.push(i);
@@ -478,43 +772,95 @@ function VenuePage({slug:SL,go}){
   const schD=st.scheduleDays||[4];
   const me=findDev(st.slots,did.current),mw=st.waitlist.find(w=>w.deviceId===did.current),al=me||mw;
   useEffect(()=>{if(vw==="signup"&&me&&me.pending&&step==="form")setStep("name")},[vw,me,step]);
-  const pickSlot=n=>{const e={id:gid(),name:"",deviceId:did.current,time:Date.now(),pending:true};persist({...st,slots:{...st.slots,[String(n)]:e},showDate:st.showDate||Date.now()});setStep("name")};
-  const joinWaitlist=()=>{setStep("waitlistName")};
-  const submitName=()=>{
-    if(!sN.trim()){flash("Enter your name");return}
-    if(me){persist({...st,slots:{...st.slots,[String(me.slotNum)]:{...st.slots[String(me.slotNum)],name:sN.trim(),pending:false}}});flash("You're in! 🎤");setSN("");if(st.allowLinks){setSL2("");setStep("linkPrompt")}else setStep("form")}
-  };
-  const submitWaitlistName=()=>{
-    if(!sN.trim()){flash("Enter your name");return}
-    persist({...st,waitlist:[...st.waitlist,{id:gid(),name:sN.trim(),deviceId:did.current,time:Date.now()}]});
-    flash("Waitlisted!");setSN("");setStep("form");
-  };
-  const releaseSlot=()=>{if(me){const s={...st.slots};delete s[String(me.slotNum)];persist({...st,slots:s})}setStep("form")};
-  const dropOut=()=>{
-    if(!confirm("Drop out of the lineup?\n\nYou'll lose your spot. You can sign up again later if slots are still open."))return;
-    if(me){
-      const s={...st.slots};delete s[String(me.slotNum)];
-      // If the dropped slot hasn't been performed yet, compress upcoming and promote a waitlister to the end.
-      const futureSlot=st.currentSlot===0||me.slotNum>st.currentSlot;
-      if(futureSlot){
-        const next=compAndPromote({...st,slots:s});
-        const promoted=(next.waitlist?.length||0)<(st.waitlist?.length||0);
-        const wlName=promoted?st.waitlist[0].name:null;
-        persist(next);
-        flash(promoted?`You're out — ${wlName} joined from the waitlist.`:"You're out. Thanks for letting us know!");
-      } else {
-        persist({...st,slots:s});
-        flash("You're out. Thanks for letting us know!");
-      }
-    } else if(mw){
-      persist({...st,waitlist:st.waitlist.filter(w=>w.deviceId!==did.current)});
-      flash("You're out. Thanks for letting us know!");
+  const pickSlot=async n=>{
+    const entry={id:gid(),name:"",deviceId:did.current,time:Date.now(),pending:true,pendingSince:Date.now()};
+    try{
+      await claimSlot(SL,n,entry);
+      await refresh();
+      setStep("name");
+    }catch(e){
+      const m=e?.message||"";
+      if(m==="SLOT_TAKEN"){flash(`Slot #${n} just got grabbed — pick another`);await refresh()}
+      else if(m==="DEVICE_ALREADY_IN"){flash("You're already signed up on this device");await refresh()}
+      else if(m==="SIGNUP_CLOSED"){flash("Sign-ups just closed");await refresh()}
+      else if(m==="VENUE_GONE"){flash("Venue no longer exists")}
+      else{flash("Couldn't reserve that slot — try again")}
     }
+  };
+  const joinWaitlist=()=>{setStep("waitlistName")};
+  const submitName=async()=>{
+    if(!sN.trim()){flash("Enter your name");return}
+    if(!me)return;
+    const updated={...st.slots[String(me.slotNum)],name:sN.trim(),pending:false};
+    delete updated.pendingSince;
+    try{
+      await upV(SL,{[`slots.${me.slotNum}`]:updated});
+      await refresh();
+      flash("You're in! 🎤");setSN("");
+      if(st.allowLinks){setSL2("");setStep("linkPrompt")}else setStep("form");
+    }catch{flash("Couldn't save — try again")}
+  };
+  const submitWaitlistName=async()=>{
+    if(!sN.trim()){flash("Enter your name");return}
+    const entry={id:gid(),name:sN.trim(),deviceId:did.current,time:Date.now()};
+    try{
+      await joinWaitlistTx(SL,entry);
+      await refresh();
+      flash("Waitlisted!");setSN("");setStep("form");
+    }catch(e){
+      const m=e?.message||"";
+      if(m==="ALREADY_WAITLISTED"||m==="DEVICE_ALREADY_IN"){flash("You're already signed up");await refresh()}
+      else if(m==="SIGNUP_CLOSED"){flash("Sign-ups just closed");await refresh()}
+      else{flash("Couldn't join waitlist — try again")}
+    }
+  };
+  const releaseSlot=async()=>{
+    if(me){
+      try{await upV(SL,{[`slots.${me.slotNum}`]:deleteField()});await refresh()}catch{/* best-effort */}
+    }
+    setStep("form");
+  };
+  const dropOut=async()=>{
+    if(!confirm("Drop out of the lineup?\n\nYou'll lose your spot. You can sign up again later if slots are still open."))return;
+    try{
+      const r=await dropOutTx(SL,did.current);
+      await refresh();
+      if(r.dropped){
+        flash(r.promoted?`You're out — ${r.promoted} joined from the waitlist.`:"You're out. Thanks for letting us know!");
+      }
+    }catch{flash("Couldn't drop out — try again")}
     setStep("form");
     setVw("landing");
   };
-  const saveEdit=()=>{if(!eN.trim()){flash("Name can't be empty");return}if(me){persist({...st,slots:{...st.slots,[String(me.slotNum)]:{...st.slots[String(me.slotNum)],name:eN.trim(),link:eL.trim()||null}}})}else if(mw){persist({...st,waitlist:st.waitlist.map(w=>w.deviceId===did.current?{...w,name:eN.trim(),link:eL.trim()||null}:w)})}flash("Updated!");setStep("form")};
-  const repick=n=>{if(!me)return;const s={...st.slots};const p={...s[String(me.slotNum)]};delete s[String(me.slotNum)];s[String(n)]=p;persist({...st,slots:s});flash(`Moved to #${n}`);setStep("form")};
+  const saveEdit=async()=>{
+    if(!eN.trim()){flash("Name can't be empty");return}
+    try{
+      if(me){
+        const updated={...st.slots[String(me.slotNum)],name:eN.trim(),link:eL.trim()||null};
+        await upV(SL,{[`slots.${me.slotNum}`]:updated});
+      }else if(mw){
+        // Read fresh waitlist to avoid clobbering — small but cheap.
+        const fresh=await ldV(SL);
+        const wl=(fresh?.waitlist||[]).map(w=>w.deviceId===did.current?{...w,name:eN.trim(),link:eL.trim()||null}:w);
+        await upV(SL,{waitlist:wl});
+      }
+      await refresh();
+      flash("Updated!");setStep("form");
+    }catch{flash("Couldn't save — try again")}
+  };
+  const repick=async n=>{
+    if(!me)return;
+    try{
+      await repickSlotTx(SL,me.slotNum,n,did.current);
+      await refresh();
+      flash(`Moved to #${n}`);setStep("form");
+    }catch(e){
+      const m=e?.message||"";
+      if(m==="SLOT_TAKEN"){flash(`Slot #${n} just got grabbed — pick another`);await refresh()}
+      else if(m==="NOT_MINE"){flash("Couldn't move — refresh and try again");await refresh()}
+      else{flash("Couldn't move — try again")}
+    }
+  };
   const startEdit=()=>{setEN(al?.name||"");setEL(al?.link||"");setStep("edit")};
   if(!ld)return<div style={PAGE}><style>{CSS}</style><p style={BODY}>loading…</p></div>;
 
@@ -527,8 +873,6 @@ function VenuePage({slug:SL,go}){
         <div><p style={SUB}>OPEN MIC</p><h1 style={{...TITLE,fontSize:32,marginTop:4}}>{st.eventName}</h1></div>
         {st.archived?<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>ENDED</span>:st.signupOpen?<span style={TAG("#d4f0e8","var(--teal)")}>OPEN</span>:<span style={TAG("var(--paper-dark)","var(--ink-mid)")}>CLOSED</span>}
       </div>
-
-      <UpdFeed updates={st.updates}/>
 
       {st.archived&&nextShow?<>
         <div style={{marginTop:18,padding:"14px 16px",background:"#fff8e8",border:"2px dashed var(--coral)",borderRadius:2}}>
@@ -570,14 +914,14 @@ function VenuePage({slug:SL,go}){
         step==="linkPrompt"?<div style={{borderTop:"2px solid var(--teal)",marginTop:16,paddingTop:16}}>
           <p style={{fontWeight:700,fontSize:16,color:"var(--teal)"}}>🎤 You're in!</p><p style={BODY}>Add a link?</p>
           <input style={{...INP,marginTop:10}} placeholder="instagram, website…" value={sL} onChange={e=>setSL2(e.target.value)}/>
-          <button style={{...BTN,width:"100%",marginTop:10}} onClick={()=>{const m2=findDev(st.slots,did.current);if(m2&&sL.trim())persist({...st,slots:{...st.slots,[String(m2.slotNum)]:{...st.slots[String(m2.slotNum)],link:sL.trim()}}});setSL2("");setStep("form")}}>{sL.trim()?"SAVE LINK":"SKIP"}</button>
+          <button style={{...BTN,width:"100%",marginTop:10}} onClick={async()=>{const m2=findDev(st.slots,did.current);if(m2&&sL.trim()){const updated={...st.slots[String(m2.slotNum)],link:sL.trim()};try{await upV(SL,{[`slots.${m2.slotNum}`]:updated});await refresh()}catch{}}setSL2("");setStep("form")}}>{sL.trim()?"SAVE LINK":"SKIP"}</button>
         </div>:step==="edit"?<div style={{marginTop:16}}>
           <label style={SUB}>YOUR NAME</label><input style={{...INP,marginTop:6}} value={eN} onChange={e=>setEN(e.target.value)}/>
           {st.allowLinks&&<><label style={{...SUB,marginTop:12,display:"block"}}>LINK</label><input style={{...INP,marginTop:6}} placeholder="optional" value={eL} onChange={e=>setEL(e.target.value)}/></>}
           <div style={{display:"flex",gap:8,marginTop:12}}><button style={{...BTN,flex:1}} onClick={saveEdit}>SAVE</button><button style={{...BTN2,flex:1}} onClick={()=>setStep("form")}>CANCEL</button></div>
         </div>:step==="editlink"?<div style={{marginTop:16}}>
           <label style={SUB}>YOUR LINK</label><input style={{...INP,marginTop:6}} value={eL} onChange={e=>setEL(e.target.value)}/>
-          <div style={{display:"flex",gap:8,marginTop:12}}><button style={{...BTN,flex:1}} onClick={()=>{if(me)persist({...st,slots:{...st.slots,[String(me.slotNum)]:{...st.slots[String(me.slotNum)],link:eL.trim()||null}}});flash("Updated!");setStep("form")}}>SAVE</button><button style={{...BTN2,flex:1}} onClick={()=>setStep("form")}>CANCEL</button></div>
+          <div style={{display:"flex",gap:8,marginTop:12}}><button style={{...BTN,flex:1}} onClick={async()=>{if(me){const updated={...st.slots[String(me.slotNum)],link:eL.trim()||null};try{await upV(SL,{[`slots.${me.slotNum}`]:updated});await refresh()}catch{}}flash("Updated!");setStep("form")}}>SAVE</button><button style={{...BTN2,flex:1}} onClick={()=>setStep("form")}>CANCEL</button></div>
         </div>:step==="repick"?<div style={{marginTop:16}}>
           <p style={BODY}>Tap an open slot to move there.</p>
           <div style={{display:"flex",flexDirection:"column",gap:3,marginTop:10}}>
@@ -644,7 +988,7 @@ function VenuePage({slug:SL,go}){
         <button style={{...BTN,width:"100%",marginTop:12}} onClick={submitWaitlistName}>JOIN WAITLIST</button>
         <button style={{...LINK,marginTop:8}} onClick={()=>{setSN("");setStep("form")}}>← back</button>
       </div>:null}
-      <button style={LINK} onClick={()=>{if(me&&me.pending){const s={...st.slots};delete s[String(me.slotNum)];persist({...st,slots:s})}setVw("landing");setStep("form")}}>← back</button>
+      <button style={LINK} onClick={async()=>{if(me&&me.pending){try{await upV(SL,{[`slots.${me.slotNum}`]:deleteField()});await refresh()}catch{}}setVw("landing");setStep("form")}}>← back</button>
     </div>
   </div>)}
 
@@ -654,7 +998,6 @@ function VenuePage({slug:SL,go}){
       <p style={SUB}>{st.eventName}</p><h2 style={{...TITLE,fontSize:24,marginTop:4}}>Lineup</h2>
       <p style={{...BODY,fontSize:12,marginTop:4}}>📅 {fD(st.showDate||Date.now())} · {cnt} acts · {st.limitMode==="time"?`${st.timePerSlot}min`:`${st.songsPerSlot} songs`}/act</p>
       {addr(st)&&<p style={{...BODY,fontSize:12,marginTop:4,lineHeight:1.4}}>📌 {addr(st)}</p>}
-      <UpdFeed updates={st.updates}/>
       {curP2&&<div style={{marginTop:16,padding:16,background:"#fff8e8",border:"2px solid var(--coral)",borderRadius:2}}>
         <p style={{...SUB,color:"var(--coral)",margin:"0 0 4px"}}>NOW ON STAGE — #{st.currentSlot}</p>
         <p style={{fontFamily:"'Fraunces',serif",fontSize:24,fontWeight:900}}>{curP2.name}</p>
@@ -680,11 +1023,27 @@ function HostPage({slug:SL,go}){
   const[st,setSt]=useState(DS);const[ld,setLd]=useState(false);const[auth,setAuth]=useState(false);
   const[pinIn,setPinIn]=useState("");const[msg,setMsg]=useState("");const[tab,setTab]=useState("show");const[aN,setAN]=useState("");
   const[aQ,setAQ]=useState("");const[aR,setAR]=useState([]);const[aL,setAL2]=useState(false);
-  const[uN,setUN]=useState("");const[edId,setEdId]=useState(null);const[edTxt,setEdTxt]=useState("");
   const refresh=useCallback(async()=>{const v=await ldV(SL);if(v)setSt(p=>({...p,...v}));setLd(true)},[SL]);
   useEffect(()=>{refresh();const id=setInterval(refresh,4000);return()=>clearInterval(id)},[refresh]);
-  const persist=useCallback(async n=>{setSt(n);await svV(SL,n)},[SL]);
+  // upd: shorthand for narrow updateDoc — never clobbers concurrent writes.
+  // For high-contention writes (slot claim, advance, drop, etc.) use the
+  // *Tx helpers defined above the components; they wrap reads + writes in
+  // a single Firestore transaction.
+  const upd=useCallback(async partial=>{
+    setSt(p=>({...p,...partial}));
+    try{await upV(SL,partial)}catch{}
+  },[SL]);
   useSchHost(st,SL,auth);
+  // Stale-pending reaper. Runs every 30s while host is authenticated.
+  // Lazy reaping inside claimSlot covers the no-host case; this catches
+  // the rest with a tighter cadence so abandoned tabs don't linger.
+  useEffect(()=>{
+    if(!auth)return;
+    const tick=()=>reapStalePending(SL);
+    tick();
+    const id=setInterval(tick,30000);
+    return()=>clearInterval(id);
+  },[auth,SL]);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   if(!ld)return<div style={PAGE}><style>{CSS}</style><p style={BODY}>loading…</p></div>;
   if(!auth){const tryP=()=>{if(pinIn===st.hostPin){setAuth(true);setPinIn("");addMyVenue(SL);upV(SL,{lastHostSeen:Date.now()})}else flash("Wrong PIN")};
@@ -698,23 +1057,49 @@ function HostPage({slug:SL,go}){
     </div>)}
   const cnt=filled(st.slots).length;const os=[];for(let i=1;i<=st.totalSlots;i++)if(!st.slots[String(i)])os.push(i);
   const curP=st.currentSlot>0?st.slots[String(st.currentSlot)]:null;const odS=nextF(st.slots,st.totalSlots,st.currentSlot),odP=odS?st.slots[String(odS)]:null;const schD=st.scheduleDays||[4];
-  const togSignup=()=>persist({...st,signupOpen:!st.signupOpen,manualOverride:true,showDate:st.showDate||(!st.signupOpen?Date.now():st.showDate)});
-  const advance=()=>{const nxt=nextF(st.slots,st.totalSlots,st.currentSlot);if(!nxt){flash("No more performers!");return}const pd=[...(st.performedDevices||[])];if(st.currentSlot>0&&st.slots[String(st.currentSlot)]){const di=st.slots[String(st.currentSlot)].deviceId;if(di&&!pd.includes(di))pd.push(di)}persist(compAndPromote({...st,currentSlot:nxt,performedDevices:pd}))};
-  const goBack=()=>{const prv=prevF(st.slots,st.currentSlot);if(!prv){flash("No previous performer");return}const pd=[...(st.performedDevices||[])];const prvP=st.slots[String(prv)];if(prvP&&prvP.deviceId){const i=pd.indexOf(prvP.deviceId);if(i>=0)pd.splice(i,1)}persist({...st,currentSlot:prv,performedDevices:pd});flash(`← Back to #${prv}`)};
-  const rmSlot=n=>{const s={...st.slots};delete s[String(n)];persist(compAndPromote({...st,slots:s}))};
-  const hostAdd=()=>{if(!aN.trim()){flash("Enter name");return}let sl=lowOpen(st.slots,st.totalSlots);let newTot=st.totalSlots;let expanded=false;if(!sl){if(st.totalSlots>=50){flash("Max slots (50) reached");return}newTot=st.totalSlots+1;sl=newTot;expanded=true}persist({...st,totalSlots:newTot,slots:{...st.slots,[String(sl)]:{id:gid(),name:aN.trim(),deviceId:"host",time:Date.now()}},showDate:st.showDate||Date.now()});flash(expanded?`Added #${sl} (+1 slot)`:`Added #${sl}`);setAN("")};
-  const resetShow=()=>persist({...st,slots:{},waitlist:[],currentSlot:0,signupOpen:false,showDate:null,manualOverride:false,performedDevices:[],updates:[]});
+  const togSignup=async()=>{
+    const willOpen=!st.signupOpen;
+    const partial={signupOpen:willOpen,manualOverride:true};
+    if(willOpen&&!st.showDate)partial.showDate=Date.now();
+    await upd(partial);
+  };
+  const advance=async()=>{
+    try{await advanceTx(SL);await refresh()}
+    catch(e){
+      if(e?.message==="NO_MORE")flash("No more performers!");
+      else flash("Couldn't advance — try again");
+    }
+  };
+  const goBack=async()=>{
+    try{const r=await goBackTx(SL);await refresh();flash(`← Back to #${r.slot}`)}
+    catch(e){
+      if(e?.message==="NO_PREV")flash("No previous performer");
+      else flash("Couldn't go back — try again");
+    }
+  };
+  const rmSlot=async n=>{
+    try{await rmSlotTx(SL,n);await refresh()}
+    catch{flash("Couldn't remove — try again")}
+  };
+  const hostAdd=async()=>{
+    if(!aN.trim()){flash("Enter name");return}
+    try{
+      const{slot,expanded}=await hostAddPerformer(SL,aN);
+      await refresh();
+      flash(expanded?`Added #${slot} (+1 slot)`:`Added #${slot}`);
+      setAN("");
+    }catch(e){
+      if(e?.message==="MAX_SLOTS")flash("Max slots (50) reached");
+      else flash("Couldn't add — try again");
+    }
+  };
+  const resetShow=async()=>{await upd({slots:{},waitlist:[],currentSlot:0,signupOpen:false,showDate:null,manualOverride:false,performedDevices:[]})};
   const deleteForever=async()=>{await dlV(SL);removeMyVenue(SL);go("")};
-  const togDay=d=>{const dy=[...schD];const i=dy.indexOf(d);if(i>=0)dy.splice(i,1);else dy.push(d);dy.sort((a,b)=>a-b);persist({...st,scheduleDays:dy})};
-  const setVGPS=()=>{if(!navigator.geolocation){flash("No geolocation");return}flash("Getting location…");navigator.geolocation.getCurrentPosition(p=>{persist({...st,venueLat:p.coords.latitude,venueLng:p.coords.longitude,venueAddress:st.venueAddress||"Current location"});flash("Pinned to current location!")},()=>flash("Failed"),{enableHighAccuracy:true,timeout:10000})};
+  const togDay=async d=>{const dy=[...schD];const i=dy.indexOf(d);if(i>=0)dy.splice(i,1);else dy.push(d);dy.sort((a,b)=>a-b);await upd({scheduleDays:dy})};
+  const setVGPS=()=>{if(!navigator.geolocation){flash("No geolocation");return}flash("Getting location…");navigator.geolocation.getCurrentPosition(async p=>{await upd({venueLat:p.coords.latitude,venueLng:p.coords.longitude,venueAddress:st.venueAddress||"Current location"});flash("Pinned to current location!")},()=>flash("Failed"),{enableHighAccuracy:true,timeout:10000})};
   const searchAddr=async()=>{if(!aQ.trim())return;setAL2(true);setAR([]);try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(aQ.trim())}`);const d=await r.json();setAR(d.map(r=>({name:r.display_name,lat:parseFloat(r.lat),lng:parseFloat(r.lon)})));if(d.length===0)flash("No results")}catch{flash("Search failed")}setAL2(false)};
-  const setVFrom=r=>{persist({...st,venueLat:r.lat,venueLng:r.lng,venueAddress:r.name});setAR([]);setAQ("");flash("Address saved!")};
-  const clearAddr=()=>{persist({...st,venueAddress:"",venueLat:null,venueLng:null,geofenceEnabled:false});flash("Cleared")};
-  const addUpd=()=>{if(!uN.trim()){flash("Write something first");return}persist({...st,updates:[...(st.updates||[]),{id:gid(),text:uN.trim(),createdAt:Date.now()}]});setUN("");flash("Update posted!")};
-  const rmUpd=id=>{if(!confirm("Remove this update?"))return;persist({...st,updates:(st.updates||[]).filter(u=>u.id!==id)})};
-  const startEdUpd=u=>{setEdId(u.id);setEdTxt(u.text)};
-  const saveEdUpd=()=>{if(!edTxt.trim()){flash("Can't be empty");return}persist({...st,updates:(st.updates||[]).map(u=>u.id===edId?{...u,text:edTxt.trim(),updatedAt:Date.now()}:u)});setEdId(null);setEdTxt("");flash("Updated!")};
-  const cancelEdUpd=()=>{setEdId(null);setEdTxt("")};
+  const setVFrom=async r=>{await upd({venueLat:r.lat,venueLng:r.lng,venueAddress:r.name});setAR([]);setAQ("");flash("Address saved!")};
+  const clearAddr=async()=>{await upd({venueAddress:"",venueLat:null,venueLng:null,geofenceEnabled:false});flash("Cleared")};
   const copyLink=()=>{const b=window.location.href.replace(/#.*$/,"");navigator.clipboard?.writeText(`${b}#${SL}`);flash("Link copied!")};
   const copyHostLink=()=>{const b=window.location.href.replace(/#.*$/,"");navigator.clipboard?.writeText(`${b}#${SL}/host`);flash("Host link copied!")};
   return(<div style={{...PAGE,alignItems:"center",paddingTop:16}}><style>{CSS}</style><Flash msg={msg}/>
@@ -729,7 +1114,7 @@ function HostPage({slug:SL,go}){
       {st.archived&&<div style={{background:"#fbeae6",border:"2px dashed var(--coral)",borderRadius:2,padding:"14px 16px",marginBottom:14}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:10}}>
           <p style={{...SUB,color:"var(--coral)",margin:0}}>ENDED · BOOKMARK THIS PAGE</p>
-          <button style={{...BTN_SM,background:"var(--teal)",color:"var(--cream)",borderColor:"var(--teal)"}} onClick={()=>{persist({...st,archived:false});flash("Restored!")}}>↻ RESTORE</button>
+          <button style={{...BTN_SM,background:"var(--teal)",color:"var(--cream)",borderColor:"var(--teal)"}} onClick={async()=>{await upd({archived:false});flash("Restored!")}}>↻ RESTORE</button>
         </div>
         <p style={{...BODY,fontSize:12,marginBottom:10}}>Hidden from the directory. To re-host this same open mic later, bookmark this page now.</p>
         <div style={{background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2,padding:"8px 10px",marginBottom:8,fontFamily:"'Overpass Mono',monospace",fontSize:11,color:"var(--ink)",wordBreak:"break-all",lineHeight:1.5}}>{typeof window!=="undefined"?`${window.location.origin}/#${SL}/host`:`/#${SL}/host`}</div>
@@ -752,40 +1137,14 @@ function HostPage({slug:SL,go}){
         <div style={{...SECT,marginTop:14}}><p style={{...SUB,margin:"0 0 8px"}}>+ QUICK ADD</p><div style={{display:"flex",gap:8}}><input style={{...INP,flex:1}} placeholder="name" value={aN} onChange={e=>setAN(e.target.value)} onKeyDown={e=>e.key==="Enter"&&hostAdd()}/><button style={BTN_SM} onClick={hostAdd}>ADD</button></div></div>
         <div style={{...SECT,marginTop:10}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><p style={{...SUB,margin:0}}>SLOTS ({cnt}/{st.totalSlots})</p><span style={{...BODY,fontSize:10}}>tap to move</span></div>
-          <SlotGrid slots={st.slots} totalSlots={st.totalSlots} currentSlot={st.currentSlot} onDeckSlot={odS} onMove={(f,t)=>persist({...st,slots:mvSlot(st.slots,st.totalSlots,f,t)})} onRemove={rmSlot} onClearLink={n=>{const p=st.slots[String(n)];if(p){const{link,...r}=p;persist({...st,slots:{...st.slots,[String(n)]:r}})}}}/>
+          <SlotGrid slots={st.slots} totalSlots={st.totalSlots} currentSlot={st.currentSlot} onDeckSlot={odS} onMove={async(f,t)=>{try{await mvSlotTx(SL,f,t);await refresh()}catch{flash("Couldn't move — try again")}}} onRemove={rmSlot} onClearLink={async n=>{try{await clearSlotLinkTx(SL,n);await refresh()}catch{}}}/>
         </div>
-        {st.waitlist.length>0&&<div style={{...SECT,marginTop:8}}><p style={{...SUB,margin:"0 0 6px"}}>WAITLIST ({st.waitlist.length})</p>{st.waitlist.map((p,i)=><div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 8px"}}><span style={{...BODY,fontSize:13}}>{i+1}. {p.name}</span><button onClick={()=>persist({...st,waitlist:st.waitlist.filter(w=>w.id!==p.id)})} style={{...BTN_GHOST,color:"var(--coral)",fontSize:14}}>×</button></div>)}</div>}
-        <div style={{...SECT,marginTop:10}}>
-          <p style={{...SUB,margin:"0 0 4px"}}>📣 UPDATES ({(st.updates||[]).length})</p>
-          <p style={{...BODY,fontSize:11,marginBottom:10}}>Post announcements visible to everyone on the venue page. Great for "starting late," themes, guest announcements, etc.</p>
-          <textarea style={{...INP,minHeight:64,resize:"vertical",lineHeight:1.4}} placeholder="e.g. 'Show starting at 8 tonight!' or 'Theme: love songs'" value={uN} onChange={e=>setUN(e.target.value)}/>
-          <button style={{...BTN,width:"100%",marginTop:8}} onClick={addUpd}>POST UPDATE →</button>
-          {(st.updates||[]).length>0&&<div style={{marginTop:14}}>
-            {[...(st.updates||[])].sort((a,b)=>b.createdAt-a.createdAt).map(u=><div key={u.id} style={{padding:"10px 12px",marginBottom:6,background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2}}>
-              {edId===u.id?<>
-                <textarea style={{...INP,minHeight:64,resize:"vertical",lineHeight:1.4}} value={edTxt} onChange={e=>setEdTxt(e.target.value)} autoFocus/>
-                <div style={{display:"flex",gap:6,marginTop:8}}>
-                  <button style={{...BTN_SM,background:"var(--ink)",color:"var(--cream)"}} onClick={saveEdUpd}>SAVE</button>
-                  <button style={{...BTN_SM,background:"var(--paper)"}} onClick={cancelEdUpd}>CANCEL</button>
-                </div>
-              </>:<>
-                <p style={{color:"var(--ink)",fontSize:13,lineHeight:1.5,whiteSpace:"pre-wrap",margin:0}}>{u.text}</p>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8}}>
-                  <span style={{fontSize:10,color:"var(--ink-light)",fontFamily:"'Overpass Mono',monospace"}}>{fAgo(u.createdAt)}{u.updatedAt?" · edited":""}</span>
-                  <div style={{display:"flex",gap:4}}>
-                    <button onClick={()=>startEdUpd(u)} style={{...BTN_GHOST,fontSize:11,padding:"2px 8px"}}>edit</button>
-                    <button onClick={()=>rmUpd(u.id)} style={{...BTN_GHOST,color:"var(--coral)",fontSize:16,padding:"2px 8px",lineHeight:1}}>×</button>
-                  </div>
-                </div>
-              </>}
-            </div>)}
-          </div>}
-        </div>
+        {st.waitlist.length>0&&<div style={{...SECT,marginTop:8}}><p style={{...SUB,margin:"0 0 6px"}}>WAITLIST ({st.waitlist.length})</p>{st.waitlist.map((p,i)=><div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 8px"}}><span style={{...BODY,fontSize:13}}>{i+1}. {p.name}</span><button onClick={async()=>{try{await rmWaitlistTx(SL,p.id);await refresh()}catch{}}} style={{...BTN_GHOST,color:"var(--coral)",fontSize:14}}>×</button></div>)}</div>}
         <div style={{marginTop:22,paddingTop:16,borderTop:"1px dashed var(--ink-faded)"}}>
           <p style={{...SUB,color:"var(--coral)",margin:"0 0 10px"}}>DANGER ZONE</p>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <button style={{...BTN_SM,background:"var(--cream)",color:"var(--coral)",borderColor:"var(--coral)"}} onClick={()=>{if(confirm("Clear tonight's lineup? The venue stays active."))resetShow()}}>↺ RESET SHOW</button>
-            <button style={{...BTN_SM,background:"var(--coral)",color:"var(--cream)",borderColor:"var(--coral)",boxShadow:"2px 2px 0 var(--ink)"}} onClick={()=>{if(confirm("End this open mic?\n\nUnless scheduling is enabled, it will be removed from the directory. IMPORTANT: bookmark this page before leaving — it's how you'll get back to restore it later."))persist({...st,archived:true,signupOpen:false})}}>✕ END OPEN MIC</button>
+            <button style={{...BTN_SM,background:"var(--coral)",color:"var(--cream)",borderColor:"var(--coral)",boxShadow:"2px 2px 0 var(--ink)"}} onClick={async()=>{if(confirm("End this open mic?\n\nUnless scheduling is enabled, it will be removed from the directory. IMPORTANT: bookmark this page before leaving — it's how you'll get back to restore it later."))await upd({archived:true,signupOpen:false})}}>✕ END OPEN MIC</button>
           </div>
           <p style={{...BODY,fontSize:11,marginTop:8}}>Reset clears tonight's performers. End hides the venue from the public directory (link still works).</p>
           <div style={{marginTop:14,paddingTop:14,borderTop:"1px dashed var(--ink-faded)"}}>
@@ -796,15 +1155,15 @@ function HostPage({slug:SL,go}){
       </>}
       {tab==="settings"&&<>
         <div style={SECT}>
-          <label style={SUB}>EVENT NAME</label><input style={{...INP,marginTop:6}} value={st.eventName} onChange={e=>persist({...st,eventName:e.target.value})}/>
-          <label style={{...SUB,marginTop:14,display:"block"}}>TOTAL SLOTS</label><NumInput style={{marginTop:6}} value={st.totalSlots} min={1} max={50} onChange={v=>persist({...st,totalSlots:v})}/>
+          <label style={SUB}>EVENT NAME</label><input style={{...INP,marginTop:6}} value={st.eventName} onChange={e=>upd({eventName:e.target.value})}/>
+          <label style={{...SUB,marginTop:14,display:"block"}}>TOTAL SLOTS</label><NumInput style={{marginTop:6}} value={st.totalSlots} min={1} max={50} onChange={v=>upd({totalSlots:v})}/>
           <label style={{...SUB,marginTop:14,display:"block"}}>LIMIT MODE</label>
           <div style={{display:"flex",borderRadius:2,overflow:"hidden",border:"2px solid var(--ink)",marginTop:8,marginBottom:10}}>
-            {[["time","⏱ MINUTES"],["songs","🎵 SONGS"]].map(([k,l])=><button key={k} onClick={()=>persist({...st,limitMode:k})} style={{flex:1,padding:"9px 0",border:"none",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Overpass Mono',monospace",background:st.limitMode===k?"var(--ink)":"var(--cream)",color:st.limitMode===k?"var(--cream)":"var(--ink-mid)"}}>{l}</button>)}
+            {[["time","⏱ MINUTES"],["songs","🎵 SONGS"]].map(([k,l])=><button key={k} onClick={()=>upd({limitMode:k})} style={{flex:1,padding:"9px 0",border:"none",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Overpass Mono',monospace",background:st.limitMode===k?"var(--ink)":"var(--cream)",color:st.limitMode===k?"var(--cream)":"var(--ink-mid)"}}>{l}</button>)}
           </div>
-          {st.limitMode==="time"?<><label style={SUB}>MINUTES PER ACT</label><NumInput style={{marginTop:6}} value={st.timePerSlot} min={1} max={30} onChange={v=>persist({...st,timePerSlot:v})}/></>:<><label style={SUB}>SONGS PER ACT</label><NumInput style={{marginTop:6}} value={st.songsPerSlot} min={1} max={10} onChange={v=>persist({...st,songsPerSlot:v})}/></>}
+          {st.limitMode==="time"?<><label style={SUB}>MINUTES PER ACT</label><NumInput style={{marginTop:6}} value={st.timePerSlot} min={1} max={30} onChange={v=>upd({timePerSlot:v})}/></>:<><label style={SUB}>SONGS PER ACT</label><NumInput style={{marginTop:6}} value={st.songsPerSlot} min={1} max={10} onChange={v=>upd({songsPerSlot:v})}/></>}
         </div>
-        <div style={{...SECT,marginTop:12}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🔗 PERFORMER LINKS</p><Toggle on={st.allowLinks} onToggle={()=>persist({...st,allowLinks:!st.allowLinks})}/></div></div>
+        <div style={{...SECT,marginTop:12}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🔗 PERFORMER LINKS</p><Toggle on={st.allowLinks} onToggle={()=>upd({allowLinks:!st.allowLinks})}/></div></div>
 
         <div style={{...SECT,marginTop:12}}>
           <p style={{...SUB,margin:"0 0 4px"}}>📌 VENUE ADDRESS</p>
@@ -821,41 +1180,41 @@ function HostPage({slug:SL,go}){
           </div>
           {aR.length>0&&<div style={{marginBottom:10}}>{aR.map((r,i)=><button key={i} onClick={()=>setVFrom(r)} style={{display:"block",width:"100%",padding:"8px 10px",marginBottom:3,background:"var(--cream)",border:"1px solid var(--ink-faded)",borderRadius:2,color:"var(--ink)",fontSize:12,textAlign:"left",cursor:"pointer",lineHeight:1.4}}>📍 {r.name}</button>)}</div>}
           <label style={{...SUB,marginTop:10,display:"block"}}>OR TYPE FREELY</label>
-          <input style={{...INP,marginTop:6}} placeholder="e.g. 'Joe's Bar, upstairs'" value={st.venueAddress||""} onChange={e=>persist({...st,venueAddress:e.target.value})}/>
+          <input style={{...INP,marginTop:6}} placeholder="e.g. 'Joe's Bar, upstairs'" value={st.venueAddress||""} onChange={e=>upd({venueAddress:e.target.value})}/>
           <p style={{...BODY,fontSize:11,marginTop:6}}>Free text is displayed only — for location lock, use search above to pin coordinates.</p>
         </div>
 
         <div style={{...SECT,marginTop:12}}>
           <p style={{...SUB,margin:"0 0 4px"}}>✉ CONTACT EMAIL</p>
           <p style={{...BODY,fontSize:11,marginBottom:8}}>Optional. Shown on your venue page so performers can reach you with questions.</p>
-          <input style={INP} type="email" placeholder="you@example.com" value={st.hostEmail||""} onChange={e=>persist({...st,hostEmail:e.target.value})}/>
+          <input style={INP} type="email" placeholder="you@example.com" value={st.hostEmail||""} onChange={e=>upd({hostEmail:e.target.value})}/>
         </div>
 
         <div style={{...SECT,marginTop:12,border:st.geofenceEnabled?"2px solid var(--ink-faded)":"1px solid var(--ink-faded)"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>📍 LOCATION LOCK</p><Toggle on={st.geofenceEnabled} onToggle={()=>{if(!st.geofenceEnabled&&!st.venueLat){flash("Pin an address first");return}persist({...st,geofenceEnabled:!st.geofenceEnabled})}}/></div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>📍 LOCATION LOCK</p><Toggle on={st.geofenceEnabled} onToggle={()=>{if(!st.geofenceEnabled&&!st.venueLat){flash("Pin an address first");return}upd({geofenceEnabled:!st.geofenceEnabled})}}/></div>
           <p style={{...BODY,fontSize:11,marginTop:6}}>Performers must be within the radius to sign up.</p>
           {st.geofenceEnabled&&<div style={{marginTop:12}}>
             {!st.venueLat&&<div style={{background:"#fbeae6",border:"1px solid var(--coral)",borderRadius:2,padding:"8px 10px",marginBottom:10}}><p style={{...BODY,fontSize:12,margin:0,color:"var(--coral)"}}>⚠ No coordinates pinned. Use the search above to pin an address, or:</p></div>}
             <button style={{...BTN_SM,width:"100%",marginBottom:10}} onClick={setVGPS}>📡 PIN CURRENT LOCATION</button>
-            <label style={SUB}>RADIUS (m)</label><NumInput style={{marginTop:6}} value={st.venueRadius} min={20} max={2000} onChange={v=>persist({...st,venueRadius:v})}/>
+            <label style={SUB}>RADIUS (m)</label><NumInput style={{marginTop:6}} value={st.venueRadius} min={20} max={2000} onChange={v=>upd({venueRadius:v})}/>
           </div>}
         </div>
         <div style={{...SECT,marginTop:12,border:st.scheduleEnabled?"2px solid var(--teal)":"1px solid var(--ink-faded)"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🕐 AUTO SCHEDULE</p><Toggle on={st.scheduleEnabled} onToggle={()=>persist({...st,scheduleEnabled:!st.scheduleEnabled})}/></div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🕐 AUTO SCHEDULE</p><Toggle on={st.scheduleEnabled} onToggle={()=>upd({scheduleEnabled:!st.scheduleEnabled})}/></div>
           {st.scheduleEnabled&&<div style={{marginTop:12}}>
             <label style={SUB}>DAYS</label><div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:6,marginBottom:12}}>{DAYS.map((d,i)=><button key={i} onClick={()=>togDay(i)} style={{padding:"6px 10px",borderRadius:2,border:"2px solid var(--ink)",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Overpass Mono',monospace",background:schD.includes(i)?"var(--ink)":"var(--cream)",color:schD.includes(i)?"var(--cream)":"var(--ink-mid)"}}>{d}</button>)}</div>
-            <label style={SUB}>SIGNUPS OPEN AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:12}}><NumInput value={st.scheduleOpenHour} min={0} max={23} onChange={v=>persist({...st,scheduleOpenHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleOpenMin} min={0} max={59} onChange={v=>persist({...st,scheduleOpenMin:v})}/></div>
-            <label style={SUB}>SHOW STARTS AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:4}}><NumInput value={st.scheduleShowHour!=null?st.scheduleShowHour:showTime(st)[0]} min={0} max={23} onChange={v=>persist({...st,scheduleShowHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleShowMin!=null?st.scheduleShowMin:showTime(st)[1]} min={0} max={59} onChange={v=>persist({...st,scheduleShowMin:v})}/></div>
+            <label style={SUB}>SIGNUPS OPEN AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:12}}><NumInput value={st.scheduleOpenHour} min={0} max={23} onChange={v=>upd({scheduleOpenHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleOpenMin} min={0} max={59} onChange={v=>upd({scheduleOpenMin:v})}/></div>
+            <label style={SUB}>SHOW STARTS AT</label><div style={{display:"flex",gap:8,alignItems:"center",marginTop:6,marginBottom:4}}><NumInput value={st.scheduleShowHour!=null?st.scheduleShowHour:showTime(st)[0]} min={0} max={23} onChange={v=>upd({scheduleShowHour:v})}/><span style={{fontWeight:700,fontSize:18}}>:</span><NumInput value={st.scheduleShowMin!=null?st.scheduleShowMin:showTime(st)[1]} min={0} max={59} onChange={v=>upd({scheduleShowMin:v})}/></div>
             <p style={{...BODY,fontSize:11,marginBottom:12,color:"var(--ink-light)"}}>{st.scheduleCloseEnabled?`Signups auto-close ${fHrs(st.scheduleCloseAfter)} after opening.`:"Signups stay open until you close them manually."} Show time is shown to performers.</p>
             <div style={{marginTop:4,paddingTop:12,borderTop:"1px dashed var(--ink-faded)"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🔒 AUTO-CLOSE &amp; ARCHIVE</p><Toggle on={st.scheduleCloseEnabled} onToggle={()=>persist({...st,scheduleCloseEnabled:!st.scheduleCloseEnabled})}/></div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><p style={{...SUB,margin:0}}>🔒 AUTO-CLOSE &amp; ARCHIVE</p><Toggle on={st.scheduleCloseEnabled} onToggle={()=>upd({scheduleCloseEnabled:!st.scheduleCloseEnabled})}/></div>
               <p style={{...BODY,fontSize:11,marginTop:6}}>Signups close and the venue archives after a set number of hours. Resets fresh next show day.</p>
               {st.scheduleCloseEnabled&&<div style={{marginTop:10}}>
                 <label style={SUB}>CLOSE AFTER (HOURS)</label>
-                <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>{[2,3,4,5,6].map(h=><button key={h} onClick={()=>persist({...st,scheduleCloseAfter:h})} style={{padding:"10px 0",flex:"1 1 50px",border:"2px solid var(--ink)",borderRadius:2,cursor:"pointer",fontFamily:"'Overpass Mono',monospace",fontSize:14,fontWeight:700,background:st.scheduleCloseAfter===h?"var(--ink)":"var(--cream)",color:st.scheduleCloseAfter===h?"var(--cream)":"var(--ink)",transition:"all .1s"}}>{h}h</button>)}</div>
+                <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>{[2,3,4,5,6].map(h=><button key={h} onClick={()=>upd({scheduleCloseAfter:h})} style={{padding:"10px 0",flex:"1 1 50px",border:"2px solid var(--ink)",borderRadius:2,cursor:"pointer",fontFamily:"'Overpass Mono',monospace",fontSize:14,fontWeight:700,background:st.scheduleCloseAfter===h?"var(--ink)":"var(--cream)",color:st.scheduleCloseAfter===h?"var(--cream)":"var(--ink)",transition:"all .1s"}}>{h}h</button>)}</div>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10}}>
                   <span style={{...SUB,margin:0}}>CUSTOM</span>
-                  <NumInput value={st.scheduleCloseAfter} min={1} max={24} onChange={v=>persist({...st,scheduleCloseAfter:v})} style={{width:60}}/>
+                  <NumInput value={st.scheduleCloseAfter} min={1} max={24} onChange={v=>upd({scheduleCloseAfter:v})} style={{width:60}}/>
                   <span style={{...BODY,fontSize:12}}>hours</span>
                 </div>
               </div>}
