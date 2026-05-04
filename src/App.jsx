@@ -7,10 +7,11 @@ import { useState, useEffect, useCallback, useRef } from "react";
 */
 
 // ─── Storage ──────────────────────────────────────────────────────
-// NOTE: firebase.js must also export `runTransaction` and `deleteField`.
-// If you haven't already, add them to the firebase.js re-exports:
-//   export { runTransaction, deleteField } from "firebase/firestore";
-import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, updateDoc, runTransaction, deleteField } from "./firebase";
+// NOTE: firebase.js must also export `runTransaction`, `deleteField`,
+// and `onSnapshot`. If you haven't already, add them to the firebase.js
+// re-exports:
+//   export { runTransaction, deleteField, onSnapshot } from "firebase/firestore";
+import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, updateDoc, runTransaction, deleteField, onSnapshot } from "./firebase";
 
 async function ldV(s) {
   const snap = await getDoc(doc(db, "venues", s));
@@ -584,12 +585,35 @@ function useSchVenue(st,slug){
 function DirPage({go}){
   const[venues,setV]=useState([]);const[ld,setLd]=useState(true);
   const[q,setQ]=useState("");const[mine,setMine]=useState([]);
+  // Live listener on the venues collection. One subscription, one read on
+  // initial connect, push updates on any change. Replaces the old N+1
+  // (load index, then per-slug ldV) pattern.
+  useEffect(()=>{
+    setMine(myVenues());
+    const unsub=onSnapshot(collection(db,"venues"),snap=>{
+      const now=Date.now();
+      const all=[];
+      for(const d of snap.docs){
+        const v=d.data();
+        const ls=lastSeen(v,now);
+        if(now-ls>SIX_MONTHS_MS)continue; // stale — filter out of UI; cleanup runs separately
+        all.push({slug:d.id,...v});
+      }
+      setV(all);setLd(false);
+    },err=>{console.error("venues listener error:",err);setLd(false)});
+    return()=>unsub();
+  },[]);
+  // One-shot stale cleanup on mount. Best-effort: failures aren't fatal.
   useEffect(()=>{(async()=>{
-    const idx=await ldIdx();const all=[];const now=Date.now();const graceFrom=now;const stale=[];
-    for(const e of idx){const v=await ldV(e.slug);if(!v)continue;const ls=lastSeen(v,graceFrom);if(now-ls>SIX_MONTHS_MS)stale.push(e.slug);else all.push({slug:e.slug,...v})}
-    setV(all);setLd(false);setMine(myVenues());
-    // fire-and-forget cleanup of stale venues
-    for(const s of stale){try{await dlV(s);removeMyVenue(s)}catch{}}
+    try{
+      const idx=await ldIdx();const now=Date.now();
+      for(const e of idx){
+        const v=await ldV(e.slug);
+        if(!v)continue;
+        const ls=lastSeen(v,now);
+        if(now-ls>SIX_MONTHS_MS){try{await dlV(e.slug);removeMyVenue(e.slug)}catch{}}
+      }
+    }catch{}
   })()},[]);
   const ql=q.trim().toLowerCase();
   const searching=ql.length>0;
@@ -761,8 +785,20 @@ function VenuePage({slug:SL,go}){
   const[sN,setSN]=useState("");const[sL,setSL2]=useState("");const[step,setStep]=useState("form");
   const[eN,setEN]=useState("");const[eL,setEL]=useState("");const[msg,setMsg]=useState("");
   const did=useRef(devId());const geo=useGeo(st);
+  // One-shot fetch — used by handlers to force an immediate post-action
+  // sync. Redundant with the listener but adds a safety net for flaky
+  // networks where the listener might lag during a reconnect.
   const refresh=useCallback(async()=>{const v=await ldV(SL);if(v)setSt(p=>({...p,...v}));setLd(true)},[SL]);
-  useEffect(()=>{refresh();const id=setInterval(refresh,3000);return()=>clearInterval(id)},[refresh]);
+  // Live listener replaces the old 3s poll. Single subscription, server
+  // pushes updates the moment any field changes, costs one read on connect
+  // plus one per actual change instead of 20 reads/minute regardless.
+  useEffect(()=>{
+    const unsub=onSnapshot(doc(db,"venues",SL),snap=>{
+      if(snap.exists())setSt(p=>({...p,...snap.data()}));
+      setLd(true);
+    },err=>{console.error("venue listener error:",err);setLd(true)});
+    return()=>unsub();
+  },[SL]);
   useSchVenue(st,SL);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(""),3000)};
   const cnt=filled(st.slots).length;const os=[];for(let i=1;i<=st.totalSlots;i++)if(!st.slots[String(i)])os.push(i);
@@ -1023,8 +1059,18 @@ function HostPage({slug:SL,go}){
   const[st,setSt]=useState(DS);const[ld,setLd]=useState(false);const[auth,setAuth]=useState(false);
   const[pinIn,setPinIn]=useState("");const[msg,setMsg]=useState("");const[tab,setTab]=useState("show");const[aN,setAN]=useState("");
   const[aQ,setAQ]=useState("");const[aR,setAR]=useState([]);const[aL,setAL2]=useState(false);
+  // One-shot fetch — used by handlers as a safety-net force-sync.
   const refresh=useCallback(async()=>{const v=await ldV(SL);if(v)setSt(p=>({...p,...v}));setLd(true)},[SL]);
-  useEffect(()=>{refresh();const id=setInterval(refresh,4000);return()=>clearInterval(id)},[refresh]);
+  // Live listener replaces the old 4s poll. The host page is the longest-
+  // open page during a show — switching to push updates is the biggest
+  // single Firestore read-cost reduction in the app.
+  useEffect(()=>{
+    const unsub=onSnapshot(doc(db,"venues",SL),snap=>{
+      if(snap.exists())setSt(p=>({...p,...snap.data()}));
+      setLd(true);
+    },err=>{console.error("host listener error:",err);setLd(true)});
+    return()=>unsub();
+  },[SL]);
   // upd: shorthand for narrow updateDoc — never clobbers concurrent writes.
   // For high-contention writes (slot claim, advance, drop, etc.) use the
   // *Tx helpers defined above the components; they wrap reads + writes in
